@@ -651,8 +651,15 @@ describe("InitService scaffold", () => {
   });
 
   describe("getNextStepsLines", () => {
+    const ghIssues = getIssueTracker("github-issues")!;
+    const customManager = getIssueTracker("custom")!;
+    // Non-custom issue tracker keeps the template-driven next steps; the
+    // custom branch is exercised separately below.
+    const next = (template: string, mainFilename: string) =>
+      getNextStepsLines(template, mainFilename, ghIssues, claudeCodeAgent);
+
     it("blank template returns steps mentioning .env and main filename (not npx sandcastle run)", () => {
-      const lines = getNextStepsLines("blank", "main.mts");
+      const lines = next("blank", "main.mts");
       expect(lines.length).toBeGreaterThanOrEqual(2);
       const joined = lines.join("\n");
       expect(joined).toContain(".env");
@@ -661,7 +668,7 @@ describe("InitService scaffold", () => {
     });
 
     it("non-blank template returns steps mentioning .env, package.json scripts, and npm run sandcastle", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain(".env");
       expect(joined).toContain("package.json");
@@ -669,103 +676,126 @@ describe("InitService scaffold", () => {
     });
 
     it("non-blank template includes a note about customizing the install command", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("npm install");
       expect(joined).toContain("onSandboxReady");
     });
 
     it("non-blank template mentions copyToWorktree and node_modules", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("copyToWorktree");
       expect(joined).toContain("node_modules");
     });
 
     it("blank template includes a step to customize prompt.md", () => {
-      const lines = getNextStepsLines("blank", "main.mts");
+      const lines = next("blank", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("prompt.md");
     });
 
     it("simple-loop template includes a step to read/customize prompt files", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("prompt");
       expect(joined).toMatch(/customiz|review|read/i);
     });
 
     it("sequential-reviewer template includes a step mentioning prompt files", () => {
-      const lines = getNextStepsLines("sequential-reviewer", "main.mts");
+      const lines = next("sequential-reviewer", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("prompt");
       expect(joined).toMatch(/customiz|review|read/i);
     });
 
     it("parallel-planner template includes a step mentioning prompt files", () => {
-      const lines = getNextStepsLines("parallel-planner", "main.mts");
+      const lines = next("parallel-planner", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("prompt");
       expect(joined).toMatch(/customiz|review|read/i);
     });
 
     it("returns at least 2 numbered steps for blank template", () => {
-      const lines = getNextStepsLines("blank", "main.mts");
+      const lines = next("blank", "main.mts");
       const numberedSteps = lines.filter((l) => /^\d+\./.test(l));
       expect(numberedSteps.length).toBeGreaterThanOrEqual(2);
     });
 
     it("returns at least 3 numbered steps for non-blank templates", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const numberedSteps = lines.filter((l) => /^\d+\./.test(l));
       expect(numberedSteps.length).toBeGreaterThanOrEqual(3);
     });
 
     it("uses main.ts filename when passed", () => {
-      const lines = getNextStepsLines("blank", "main.ts");
+      const lines = next("blank", "main.ts");
       const joined = lines.join("\n");
       expect(joined).toContain("main.ts");
       expect(joined).not.toContain("main.mts");
     });
 
     it("reviewer template mentions CODING_STANDARDS.md customization", () => {
-      const lines = getNextStepsLines("sequential-reviewer", "main.mts");
+      const lines = next("sequential-reviewer", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("CODING_STANDARDS.md");
     });
 
     it("non-reviewer template does not mention CODING_STANDARDS.md", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const joined = lines.join("\n");
       expect(joined).not.toContain("CODING_STANDARDS.md");
     });
 
     it("blank template does not mention CODING_STANDARDS.md", () => {
-      const lines = getNextStepsLines("blank", "main.mts");
+      const lines = next("blank", "main.mts");
       const joined = lines.join("\n");
       expect(joined).not.toContain("CODING_STANDARDS.md");
     });
 
     it("planner template includes a step to install a schema validator", () => {
-      const lines = getNextStepsLines("parallel-planner", "main.mts");
+      const lines = next("parallel-planner", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("npm install zod");
       expect(joined).toContain("standardschema.dev");
     });
 
     it("parallel-planner-with-review template includes the schema validator step", () => {
-      const lines = getNextStepsLines(
-        "parallel-planner-with-review",
-        "main.mts",
-      );
+      const lines = next("parallel-planner-with-review", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("npm install zod");
     });
 
     it("non-planner template does not mention installing zod", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const joined = lines.join("\n");
       expect(joined).not.toContain("zod");
+    });
+
+    it("custom issue tracker points at the setup doc and the agent's setup command, regardless of template", () => {
+      const lines = getNextStepsLines(
+        "simple-loop",
+        "main.mts",
+        customManager,
+        claudeCodeAgent,
+      );
+      const joined = lines.join("\n");
+      expect(joined).toContain("SETUP_ISSUE_TRACKER.md");
+      expect(joined).toContain(claudeCodeAgent.setupCommand);
+      // The template-driven steps must not leak into the custom branch.
+      expect(joined).not.toContain("npm run sandcastle");
+    });
+
+    it("custom issue tracker warns the setup command runs on the host", () => {
+      const lines = getNextStepsLines(
+        "blank",
+        "main.mts",
+        customManager,
+        getAgent("opencode")!,
+      );
+      const joined = lines.join("\n");
+      expect(joined.toLowerCase()).toContain("host");
+      expect(joined).toContain(getAgent("opencode")!.setupCommand);
     });
   });
 
@@ -1347,9 +1377,76 @@ describe("InitService scaffold", () => {
       );
     });
 
+    it("getIssueTracker returns custom entry with broken-until-configured templateArgs", () => {
+      const manager = getIssueTracker("custom");
+      expect(manager).toBeDefined();
+      expect(manager!.label).toBe("Custom");
+      // Only the list command is a real shell expression — it hard-fails the
+      // run (exit 1) and points at the setup doc.
+      expect(manager!.templateArgs.LIST_TASKS_COMMAND).toContain("exit 1");
+      expect(manager!.templateArgs.LIST_TASKS_COMMAND).toContain(
+        "SETUP_ISSUE_TRACKER.md",
+      );
+      expect(manager!.templateArgs.LIST_TASKS_COMMAND).toContain(">&2");
+      // View/close are inline text markers, not runnable commands.
+      expect(manager!.templateArgs.VIEW_TASK_COMMAND).toContain("view command");
+      expect(manager!.templateArgs.VIEW_TASK_COMMAND).toContain(
+        "SETUP_ISSUE_TRACKER.md",
+      );
+      expect(manager!.templateArgs.CLOSE_TASK_COMMAND).toContain(
+        "close command",
+      );
+      expect(manager!.templateArgs.CLOSE_TASK_COMMAND).toContain(
+        "SETUP_ISSUE_TRACKER.md",
+      );
+      // Dockerfile install block is a TODO comment pointing at the doc.
+      expect(manager!.templateArgs.ISSUE_TRACKER_TOOLS).toContain("TODO");
+      expect(manager!.templateArgs.ISSUE_TRACKER_TOOLS).toContain(
+        "SETUP_ISSUE_TRACKER.md",
+      );
+      expect(manager!.envExample).toContain("TODO");
+      expect(manager!.envExample).toContain("SETUP_ISSUE_TRACKER.md");
+    });
+
+    it("listIssueTrackers includes custom", () => {
+      const managers = listIssueTrackers();
+      expect(managers.some((m) => m.name === "custom")).toBe(true);
+    });
+
     it("getIssueTracker returns undefined for unknown manager", () => {
       expect(getIssueTracker("nonexistent")).toBeUndefined();
     });
+  });
+
+  describe("Agent setupCommand", () => {
+    it.each([
+      {
+        name: "claude-code",
+        command: `claude "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
+      },
+      {
+        name: "codex",
+        command: `codex "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
+      },
+      {
+        name: "cursor",
+        command: `agent "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
+      },
+      { name: "pi", command: `pi "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"` },
+      {
+        name: "opencode",
+        command: `opencode -p "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
+      },
+      {
+        name: "copilot",
+        command: `copilot -i "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
+      },
+    ])(
+      "$name has the expected interactive setupCommand",
+      ({ name, command }) => {
+        expect(getAgent(name)!.setupCommand).toBe(command);
+      },
+    );
   });
 
   describe("Issue tracker scaffold", () => {
@@ -1458,6 +1555,110 @@ describe("InitService scaffold", () => {
         "utf-8",
       );
       expect(prompt).not.toContain("GitHub issue");
+    });
+
+    // --- custom issue tracker ---
+
+    const customManager = getIssueTracker("custom");
+
+    it("custom scaffolds .sandcastle/SETUP_ISSUE_TRACKER.md", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: customManager,
+      });
+
+      const setup = await readFile(
+        join(dir, ".sandcastle", "SETUP_ISSUE_TRACKER.md"),
+        "utf-8",
+      );
+      // Goal + interview + the three commands the agent must produce.
+      expect(setup).toContain("list");
+      expect(setup).toContain("view");
+      expect(setup).toContain("close");
+      // It must explicitly tell the agent to remove the exit 1 sentinel.
+      expect(setup).toContain("exit 1");
+      // The markers the agent will actually find in the scaffolded files.
+      expect(setup).toContain(customManager!.templateArgs.VIEW_TASK_COMMAND);
+      expect(setup).toContain(customManager!.templateArgs.CLOSE_TASK_COMMAND);
+    });
+
+    it("custom SETUP doc references the chosen provider's build-image command", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: customManager,
+        sandboxProvider: getSandboxProvider("podman"),
+      });
+
+      const setup = await readFile(
+        join(dir, ".sandcastle", "SETUP_ISSUE_TRACKER.md"),
+        "utf-8",
+      );
+      expect(setup).toContain("sandcastle podman build-image");
+      expect(setup).not.toContain("sandcastle docker build-image");
+    });
+
+    it("non-custom issue trackers do not scaffold SETUP_ISSUE_TRACKER.md", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: getIssueTracker("github-issues"),
+      });
+
+      const { access } = await import("node:fs/promises");
+      await expect(
+        access(join(dir, ".sandcastle", "SETUP_ISSUE_TRACKER.md")),
+      ).rejects.toThrow();
+    });
+
+    it("custom Dockerfile leaves a TODO install block instead of a real CLI", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: customManager,
+      });
+
+      const dockerfile = await readFile(
+        join(dir, ".sandcastle", "Dockerfile"),
+        "utf-8",
+      );
+      expect(dockerfile).toContain("TODO");
+      expect(dockerfile).toContain("SETUP_ISSUE_TRACKER.md");
+      expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
+      // No real issue-tracker CLI baked in yet.
+      expect(dockerfile).not.toContain("GitHub CLI");
+    });
+
+    it("custom simple-loop prompt hard-fails the list command with a pointer to the doc", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: customManager,
+      });
+
+      const prompt = await readFile(
+        join(dir, ".sandcastle", "prompt.md"),
+        "utf-8",
+      );
+      expect(prompt).toContain("exit 1");
+      expect(prompt).toContain("SETUP_ISSUE_TRACKER.md");
+      expect(prompt).not.toContain("{{LIST_TASKS_COMMAND}}");
+    });
+
+    it("custom .env.example carries a TODO for tracker env vars", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: customManager,
+      });
+
+      const envExample = await readFile(
+        join(dir, ".sandcastle", ".env.example"),
+        "utf-8",
+      );
+      expect(envExample).toContain("TODO");
+      expect(envExample).toContain("SETUP_ISSUE_TRACKER.md");
     });
 
     // --- sequential-reviewer ---

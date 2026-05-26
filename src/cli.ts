@@ -310,42 +310,57 @@ const initCommand = Command.make(
         ),
       );
 
-      // Prompt user before building image
+      // Prompt user before building image. The custom issue tracker scaffolds
+      // an intentionally unfinished Dockerfile (the install block is a TODO),
+      // so there is nothing valid to build yet — skip the build prompt entirely
+      // and let the next steps point the user at the setup doc.
       const providerLabel = selectedSandboxProvider.label;
-      const shouldBuild = yield* Effect.promise(() =>
-        clack.confirm({
-          message: `Build the default ${providerLabel} image now?`,
-          initialValue: true,
-        }),
-      );
-
-      if (shouldBuild === true) {
-        const containerfileDir = join(cwd, CONFIG_DIR);
-        if (selectedSandboxProvider.name === "podman") {
-          yield* d.spinner(
-            `Building ${providerLabel} image '${imageName}'...`,
-            podmanBuildImage(imageName, containerfileDir),
-          );
-        } else {
-          yield* d.spinner(
-            `Building ${providerLabel} image '${imageName}'...`,
-            buildImage(imageName, containerfileDir, {
-              buildArgs: defaultUidBuildArgs(),
-            }),
-          );
-        }
-        yield* d.status("Init complete! Image built successfully.", "success");
-      } else {
+      if (selectedIssueTracker.name === "custom") {
         yield* d.status(
-          `Init complete! Run \`sandcastle ${selectedSandboxProvider.cliNamespace} build-image\` to build the ${providerLabel} image later.`,
+          "Init complete! Your custom issue tracker isn't configured yet — see the steps below before building.",
           "success",
         );
+      } else {
+        const shouldBuild = yield* Effect.promise(() =>
+          clack.confirm({
+            message: `Build the default ${providerLabel} image now?`,
+            initialValue: true,
+          }),
+        );
+
+        if (shouldBuild === true) {
+          const containerfileDir = join(cwd, CONFIG_DIR);
+          if (selectedSandboxProvider.name === "podman") {
+            yield* d.spinner(
+              `Building ${providerLabel} image '${imageName}'...`,
+              podmanBuildImage(imageName, containerfileDir),
+            );
+          } else {
+            yield* d.spinner(
+              `Building ${providerLabel} image '${imageName}'...`,
+              buildImage(imageName, containerfileDir, {
+                buildArgs: defaultUidBuildArgs(),
+              }),
+            );
+          }
+          yield* d.status(
+            "Init complete! Image built successfully.",
+            "success",
+          );
+        } else {
+          yield* d.status(
+            `Init complete! Run \`sandcastle ${selectedSandboxProvider.cliNamespace} build-image\` to build the ${providerLabel} image later.`,
+            "success",
+          );
+        }
       }
 
       // Show template-specific next steps
       const nextSteps = getNextStepsLines(
         selectedTemplate,
         scaffoldResult.mainFilename,
+        selectedIssueTracker,
+        selectedAgent,
       );
       for (const [i, line] of nextSteps.entries()) {
         yield* d.text(i === 0 ? line : styleText("dim", line));
