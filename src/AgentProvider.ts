@@ -17,7 +17,8 @@ export type ParsedStreamEvent =
   | { type: "text"; text: string }
   | { type: "result"; result: string }
   | { type: "tool_call"; name: string; args: string }
-  | { type: "session_id"; sessionId: string };
+  | { type: "session_id"; sessionId: string }
+  | { type: "usage"; usage: IterationUsage };
 
 const shellEscape = (s: string): string => "'" + s.replace(/'/g, "'\\''") + "'";
 
@@ -332,6 +333,34 @@ export const pi = (model: string, options?: PiOptions): AgentProvider => ({
 // Codex agent provider
 // ---------------------------------------------------------------------------
 
+/**
+ * Map a Codex `turn.completed` usage object to the Claude-shaped IterationUsage.
+ *
+ * OpenAI/Codex usage is `{ input_tokens, cached_input_tokens, output_tokens }`,
+ * where `input_tokens` is the *total* prompt tokens and `cached_input_tokens` is
+ * a subset already included in that total. There is no cache-creation concept.
+ * To avoid double-counting cached tokens in the context-window display (which
+ * sums input + cacheCreation + cacheRead), the cached portion maps to
+ * `cacheReadInputTokens` and the remainder to `inputTokens`.
+ */
+const parseCodexUsage = (usage: unknown): IterationUsage | undefined => {
+  if (typeof usage !== "object" || usage === null) return undefined;
+  const u = usage as Record<string, unknown>;
+  if (
+    typeof u.input_tokens !== "number" ||
+    typeof u.cached_input_tokens !== "number" ||
+    typeof u.output_tokens !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    inputTokens: u.input_tokens - u.cached_input_tokens,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: u.cached_input_tokens,
+    outputTokens: u.output_tokens,
+  };
+};
+
 const parseCodexStreamLine = (line: string): ParsedStreamEvent[] => {
   if (!line.startsWith("{")) return [];
   try {
@@ -371,7 +400,11 @@ const parseCodexStreamLine = (line: string): ParsedStreamEvent[] => {
       return msg ? [{ type: "result", result: msg }] : [];
     }
 
-    // turn.completed → skip
+    // turn.completed carries token usage for the turn.
+    if (obj.type === "turn.completed") {
+      const usage = parseCodexUsage(obj.usage);
+      return usage ? [{ type: "usage", usage }] : [];
+    }
   } catch {
     // Not valid JSON — skip
   }

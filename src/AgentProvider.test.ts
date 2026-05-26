@@ -584,9 +584,45 @@ describe("codex factory", () => {
     ]);
   });
 
-  it("parseStreamLine skips turn.completed events", () => {
+  it("parseStreamLine skips turn.completed events without usage", () => {
     const provider = codex("gpt-5.4-mini");
     const line = JSON.stringify({ type: "turn.completed" });
+    expect(provider.parseStreamLine(line)).toEqual([]);
+  });
+
+  it("parseStreamLine extracts usage from turn.completed", () => {
+    const provider = codex("gpt-5.4-mini");
+    const line = JSON.stringify({
+      type: "turn.completed",
+      usage: {
+        input_tokens: 8497,
+        cached_input_tokens: 8448,
+        output_tokens: 51,
+      },
+    });
+    // OpenAI semantics: input_tokens is the total prompt count and
+    // cached_input_tokens is a subset already included. Map cached tokens to
+    // cache-read and the remainder to input so the context-window display does
+    // not double-count them.
+    expect(provider.parseStreamLine(line)).toEqual([
+      {
+        type: "usage",
+        usage: {
+          inputTokens: 49,
+          cacheCreationInputTokens: 0,
+          cacheReadInputTokens: 8448,
+          outputTokens: 51,
+        },
+      },
+    ]);
+  });
+
+  it("parseStreamLine skips turn.completed with malformed usage", () => {
+    const provider = codex("gpt-5.4-mini");
+    const line = JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: "lots", output_tokens: 51 },
+    });
     expect(provider.parseStreamLine(line)).toEqual([]);
   });
 

@@ -3061,7 +3061,14 @@ describe("Orchestrator with pi provider", () => {
 const codexTestProvider = codexFactory("gpt-5.4-mini");
 
 /** Format a mock agent result as Codex JSON stream lines */
-const toCodexStreamJson = (output: string): string => {
+const toCodexStreamJson = (
+  output: string,
+  usage?: {
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+  },
+): string => {
   const lines: string[] = [];
   lines.push(
     JSON.stringify({
@@ -3069,6 +3076,9 @@ const toCodexStreamJson = (output: string): string => {
       item: { type: "agent_message", text: output },
     }),
   );
+  if (usage) {
+    lines.push(JSON.stringify({ type: "turn.completed", usage }));
+  }
   return lines.join("\n");
 };
 
@@ -3079,6 +3089,11 @@ const toCodexStreamJson = (output: string): string => {
 const makeMockCodexAgentLayer = (
   sandboxDir: string,
   mockAgentBehavior: (sandboxRepoDir: string) => Promise<string>,
+  usage?: {
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+  },
 ): Layer.Layer<Sandbox> => {
   const fsLayer = makeLocalSandboxLayer(sandboxDir);
 
@@ -3090,7 +3105,7 @@ const makeMockCodexAgentLayer = (
           return Effect.gen(function* () {
             const cwd = options?.cwd ?? sandboxDir;
             const output = yield* Effect.promise(() => mockAgentBehavior(cwd));
-            const streamOutput = toCodexStreamJson(output);
+            const streamOutput = toCodexStreamJson(output, usage);
             for (const line of streamOutput.split("\n")) {
               onLine(line);
             }
@@ -3181,6 +3196,37 @@ describe("Orchestrator with codex provider", () => {
 
     expect(result.iterations.length).toBe(1);
     expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
+  });
+
+  it("populates usage on IterationResult from turn.completed stream events", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-codex-usage-host-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) =>
+      makeMockCodexAgentLayer(
+        dir,
+        async () => "All done. <promise>COMPLETE</promise>",
+        { input_tokens: 8497, cached_input_tokens: 8448, output_tokens: 51 },
+      ),
+    );
+
+    const result = await Effect.runPromise(
+      orchestrate({
+        provider: codexTestProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do some work",
+      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+    );
+
+    // Usage flows from the stream even without bind-mount session capture.
+    expect(result.iterations[0]!.usage).toEqual({
+      inputTokens: 49,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 8448,
+      outputTokens: 51,
+    });
   });
 });
 

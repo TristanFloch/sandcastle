@@ -31,10 +31,14 @@ const invokeAgent = (
   idleWarningIntervalMs: number = IDLE_WARNING_INTERVAL_MS,
   resumeSession?: string,
   signal?: AbortSignal,
-): Effect.Effect<{ result: string; sessionId?: string }, SandboxError> =>
+): Effect.Effect<
+  { result: string; sessionId?: string; usage?: IterationUsage },
+  SandboxError
+> =>
   Effect.gen(function* () {
     let resultText = "";
     let sessionId: string | undefined;
+    let usage: IterationUsage | undefined;
 
     // Deferred that will be failed when the idle timer fires
     const timeoutSignal = yield* Deferred.make<never, AgentIdleTimeoutError>();
@@ -107,6 +111,8 @@ const invokeAgent = (
               onToolCall(parsed.name, parsed.args);
             } else if (parsed.type === "session_id") {
               sessionId = parsed.sessionId;
+            } else if (parsed.type === "usage") {
+              usage = parsed.usage;
             }
           }
         },
@@ -132,7 +138,7 @@ const invokeAgent = (
         );
       }
 
-      return { result: resultText || execResult.stdout, sessionId };
+      return { result: resultText || execResult.stdout, sessionId, usage };
     }).pipe(
       Effect.ensuring(
         Effect.sync(() => {
@@ -348,7 +354,11 @@ export const orchestrate = (
                       : `Agent idle for ${minutes} minutes`;
                   Effect.runPromise(display.status(label(msg), "warn"));
                 };
-                const { result: agentOutput, sessionId } = yield* invokeAgent(
+                const {
+                  result: agentOutput,
+                  sessionId,
+                  usage: streamUsage,
+                } = yield* invokeAgent(
                   ctx.sandbox,
                   ctx.sandboxRepoDir,
                   fullPrompt,
@@ -367,9 +377,11 @@ export const orchestrate = (
 
                 yield* display.status(label("Agent stopped"), "info");
 
-                // Capture session while sandbox is still alive
+                // Capture session while sandbox is still alive. Usage from the
+                // stream (e.g. Codex's turn.completed) is the baseline; a
+                // session-parsed value below overrides it when available.
                 let sessionFilePath: string | undefined;
-                let usage: IterationUsage | undefined;
+                let usage: IterationUsage | undefined = streamUsage;
                 if (
                   provider.captureSessions &&
                   provider.sessionStorage &&
@@ -405,7 +417,8 @@ export const orchestrate = (
                         .catch(() => undefined as string | undefined),
                     );
                     if (content) {
-                      usage = provider.parseSessionUsage(content);
+                      const parsedUsage = provider.parseSessionUsage(content);
+                      if (parsedUsage) usage = parsedUsage;
                     }
                   }
                 }

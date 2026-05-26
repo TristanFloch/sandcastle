@@ -49,7 +49,7 @@ If any of these is missing, the agent likely cannot be supported until its CLI c
 
 These unlock extra Sandcastle features but are not required:
 
-- **Per-iteration token usage.** Tokens reported in the session log (input, output, cache create, cache read). Today only Claude Code; powers the usage display.
+- **Per-iteration token usage.** Token counts (input, output, cache create, cache read) surfaced either in the session log (parsed via `parseSessionUsage`, e.g. Claude Code) or in a stream event (emitted as a `usage` `ParsedStreamEvent`, e.g. Codex's `turn.completed`). Powers the usage display. Stream-sourced usage works even when session capture is off.
 - **Interactive mode.** A separate invocation form for human use (`interactive()`). If the agent has a TUI, expose it via `buildInteractiveArgs`.
 
 ### Scaffold prerequisites
@@ -90,7 +90,7 @@ Field by field:
 - `sessionStorage` — provider-owned factories that describe where and how the agent's session record is persisted ([ADR 0012](../adr/0012-agent-provider-owned-session-storage.md)). The provider supplies `hostStore` (reads/writes session content on the **host**), `sandboxStore` (the same, inside the **sandbox** via the bind-mount handle), `transfer` (copies a session between two stores, applying any format-specific content rewriting — e.g. Claude Code rewrites the `cwd` field in each JSONL entry from source-cwd to target-cwd), and `findByIdOnHost` (locates a session on the **host** by its unique id, independent of cwd encoding — used by the no-sandbox resume precheck, where the agent runs on the **host** and writes the session in place under a cwd-derived directory Sandcastle cannot reliably reconstruct). Resumable providers must be filesystem-backed; stores wrap the provider's directory + filename convention.
 - `buildPrintCommand({ prompt, dangerouslySkipPermissions, resumeSession })` — returns the shell command to run the agent non-interactively. Return `{ command, stdin }` when piping the prompt via stdin (preferred for large prompts). When `resumeSession` is set, append the agent's native resume CLI flag.
 - `buildInteractiveArgs(options)` — optional. Returns the argv array for `interactive()`. Omit if the agent has no TUI.
-- `parseStreamLine(line)` — given one line of stdout, return zero or more `ParsedStreamEvent`s. Event types: `text`, `result`, `tool_call`, `session_id`. Return `[]` for lines you can't or don't need to parse. **Emitting `session_id` is required** — without it, Sandcastle cannot capture the session for resume.
+- `parseStreamLine(line)` — given one line of stdout, return zero or more `ParsedStreamEvent`s. Event types: `text`, `result`, `tool_call`, `session_id`, `usage`. Return `[]` for lines you can't or don't need to parse. **Emitting `session_id` is required** — without it, Sandcastle cannot capture the session for resume. Emit `usage` if the stream carries token counts (e.g. Codex's `turn.completed`); it feeds the usage display without needing session capture.
 - `parseSessionUsage(content)` — optional. Given the session log content, return token usage for the most recent iteration. Currently only Claude Code implements this.
 
 ### `SessionStore`
