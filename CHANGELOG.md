@@ -1,5 +1,11 @@
 # @ai-hero/sandcastle
 
+## 0.6.4
+
+### Patch Changes
+
+- 157dafc: Add a hint to the `sequential-reviewer` and `simple-loop` implement prompts noting that the issue list is already filtered and discouraging an unfiltered re-query, so the agent is less likely to bypass the configured label filter when the list is empty.
+
 ## 0.6.3
 
 ### Patch Changes
