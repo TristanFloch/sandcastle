@@ -362,6 +362,61 @@ export const codex = (
 // OpenCode agent provider
 // ---------------------------------------------------------------------------
 
+/** Maps allowlisted OpenCode tool names to a display name and the input field
+ *  containing the display arg. OpenCode tool names are lowercase and differ
+ *  from Claude/Pi's; we normalise the display name to match the other agents. */
+const OPENCODE_TOOL_ARG_FIELDS: Record<
+  string,
+  { readonly name: string; readonly field: string }
+> = {
+  bash: { name: "Bash", field: "command" },
+  webfetch: { name: "WebFetch", field: "url" },
+  task: { name: "Agent", field: "description" },
+};
+
+const parseOpenCodeStreamLine = (line: string): ParsedStreamEvent[] => {
+  if (!line.startsWith("{")) return [];
+  try {
+    const obj = JSON.parse(line);
+    const part = obj.part;
+
+    // step_start carries the session ID for the run.
+    if (obj.type === "step_start" && typeof obj.sessionID === "string") {
+      return [{ type: "session_id", sessionId: obj.sessionID }];
+    }
+
+    // text event → assistant text. Emit both text (for streaming display) and
+    // result (final message; the last result wins in the Orchestrator).
+    if (
+      obj.type === "text" &&
+      part?.type === "text" &&
+      typeof part.text === "string"
+    ) {
+      return [
+        { type: "text", text: part.text },
+        { type: "result", result: part.text },
+      ];
+    }
+
+    // tool_use event → tool call. Tool name is in part.tool, args in
+    // part.state.input. Only allowlisted tools are surfaced.
+    if (obj.type === "tool_use" && part?.type === "tool") {
+      const mapping = OPENCODE_TOOL_ARG_FIELDS[part.tool];
+      if (mapping === undefined) return []; // not allowlisted
+      const input = part.state?.input as Record<string, unknown> | undefined;
+      if (!input) return [];
+      const argValue = input[mapping.field];
+      if (typeof argValue !== "string") return []; // missing/wrong arg field
+      return [{ type: "tool_call", name: mapping.name, args: argValue }];
+    }
+
+    // step_finish, tool output, etc. → skip
+  } catch {
+    // Not valid JSON — skip
+  }
+  return [];
+};
+
 /** Options for the opencode agent provider. */
 export interface OpenCodeOptions {
   /** Provider-specific reasoning effort variant (e.g. "high", "max", "low", "minimal"). */
@@ -393,8 +448,8 @@ export const opencode = (
     return args;
   },
 
-  parseStreamLine(_line: string): ParsedStreamEvent[] {
-    return [];
+  parseStreamLine(line: string): ParsedStreamEvent[] {
+    return parseOpenCodeStreamLine(line);
   },
 });
 
