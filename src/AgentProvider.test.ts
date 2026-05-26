@@ -1380,6 +1380,14 @@ describe("copilot factory", () => {
     expect(command).toContain("'it'\\''s a test'");
   });
 
+  it("buildPrintCommand rejects prompts larger than the argv-safe limit", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const huge = "x".repeat(120 * 1024 + 1);
+    expect(() => provider.buildPrintCommand(opts(huge))).toThrow(
+      /Copilot print-mode prompt/,
+    );
+  });
+
   it("buildPrintCommand includes --effort when specified", () => {
     const provider = copilot("claude-sonnet-4.5", { effort: "high" });
     const { command } = provider.buildPrintCommand(opts("test"));

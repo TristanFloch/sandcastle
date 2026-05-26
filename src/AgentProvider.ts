@@ -610,6 +610,23 @@ export const opencode = (
 // ---------------------------------------------------------------------------
 
 /**
+ * Copilot CLI print mode passes the prompt as the `-p` argv argument; the CLI
+ * accepts only command-line *options* on stdin, not the prompt itself. Linux
+ * enforces a per-argument limit (~128 KiB, ARG_MAX stack). Stay slightly under
+ * so users get a clear error instead of spawn E2BIG. Mirrors the Cursor guard.
+ */
+const COPILOT_PRINT_PROMPT_MAX_BYTES = 120 * 1024;
+
+function assertCopilotPrintPromptFitsArgv(prompt: string): void {
+  const n = Buffer.byteLength(prompt, "utf8");
+  if (n > COPILOT_PRINT_PROMPT_MAX_BYTES) {
+    throw new Error(
+      `Copilot print-mode prompt is ${n} bytes (max ${COPILOT_PRINT_PROMPT_MAX_BYTES} bytes). The Copilot CLI accepts the prompt only as a command-line argument; shorten the prompt or split the work. Other Sandcastle providers use stdin for large prompts.`,
+    );
+  }
+}
+
+/**
  * Parse one line of `copilot --output-format json` JSONL output.
  *
  * Schema (observed via `copilot -p ... --output-format json --model ...`):
@@ -704,10 +721,17 @@ export const copilot = (
   env: options?.env ?? {},
   captureSessions: false,
 
+  // Copilot CLI does expose `--resume <id>`, but its session state is indexed by
+  // a SQLite database alongside the JSONL files in ~/.copilot/session-state/, so
+  // transferring a single session file between host and sandbox is not enough to
+  // make resume work (see ADR 0016). Until the round-trip is verified end-to-end,
+  // copilot is non-resumable: captureSessions is false, there is no sessionStorage,
+  // and resumeSession is ignored here — like cursor, pi, and opencode.
   buildPrintCommand({
     prompt,
     dangerouslySkipPermissions,
   }: AgentCommandOptions): PrintCommand {
+    assertCopilotPrintPromptFitsArgv(prompt);
     const allowAll = dangerouslySkipPermissions ? " --allow-all-tools" : "";
     const effortFlag = options?.effort ? ` --effort ${options.effort}` : "";
     return {
