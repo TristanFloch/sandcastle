@@ -130,6 +130,8 @@ export interface WorktreeRunOptions {
   readonly completionSignal?: string | string[];
   /** Idle timeout in seconds. Default: 600. */
   readonly idleTimeoutSeconds?: number;
+  /** Grace window in seconds after a completion signal is observed but the agent process has not exited. See ADR 0019. Default: 60. */
+  readonly completionTimeoutSeconds?: number;
   /** Optional name for the run. */
   readonly name?: string;
   /** Logging mode. */
@@ -646,6 +648,7 @@ export const createWorktree = async (
           provider,
           completionSignal: opts.completionSignal,
           idleTimeoutSeconds: opts.idleTimeoutSeconds,
+          completionTimeoutSeconds: opts.completionTimeoutSeconds,
           name: opts.name,
           resumeSession: opts.resumeSession,
           signal: opts.signal,

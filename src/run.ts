@@ -244,6 +244,17 @@ export interface RunOptions<A extends AgentProvider = AgentProvider> {
   readonly completionSignal?: string | string[];
   /** Idle timeout in seconds. If the agent produces no output for this long, it fails. Default: 600 (10 minutes) */
   readonly idleTimeoutSeconds?: number;
+  /**
+   * Grace window in seconds after a completion signal is observed in the
+   * agent's output. The agent process is expected to exit shortly after
+   * emitting the signal; if it does not (typically because a spawned child —
+   * a `gh`/git subprocess or long-lived MCP server — keeps stdout open),
+   * Sandcastle force-completes the iteration with a warning. Resets on every
+   * subsequent output line so trailing data (token-usage events, terminal
+   * `result` events, structured-output tags) is still captured. Independent
+   * of `idleTimeoutSeconds`. Default: 60.
+   */
+  readonly completionTimeoutSeconds?: number;
   /** Optional name for the run, shown as a prefix in log output */
   readonly name?: string;
   /** Paths relative to the host repo root to copy into the worktree before sandbox start. */
@@ -597,6 +608,7 @@ export async function run(
       provider,
       completionSignal: options.completionSignal,
       idleTimeoutSeconds: options.idleTimeoutSeconds,
+      completionTimeoutSeconds: options.completionTimeoutSeconds,
       name: options.name,
       resumeSession: options.resumeSession,
       forkSession: options.forkSession,
