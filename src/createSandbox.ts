@@ -23,7 +23,12 @@ import {
 import { resolvePrompt } from "./PromptResolver.js";
 import { preprocessPrompt } from "./PromptPreprocessor.js";
 import type { LoggingOption, Timeouts } from "./run.js";
-import { buildLogFilename, printFileDisplayStartup } from "./run.js";
+import {
+  buildCompletionMessage,
+  buildContextWindowLines,
+  buildLogFilename,
+  printFileDisplayStartup,
+} from "./run.js";
 import {
   withSandboxLifecycle,
   runHostHooks,
@@ -325,7 +330,7 @@ const buildSandboxHandle = (
             const display = yield* Display;
             yield* display.intro(runOptions.name ?? "sandcastle");
 
-            return yield* orchestrate({
+            const orchestrateResult = yield* orchestrate({
               hostRepoDir,
               iterations: maxIterations,
               prompt: resolvedPrompt,
@@ -338,6 +343,20 @@ const buildSandboxHandle = (
               skipPromptExpansion: isInlinePrompt,
               timeouts,
             });
+
+            const completion = buildCompletionMessage(
+              orchestrateResult.completionSignal,
+              orchestrateResult.iterations.length,
+            );
+            yield* display.status(completion.message, completion.severity);
+
+            for (const line of buildContextWindowLines(
+              orchestrateResult.iterations,
+            )) {
+              yield* display.text(line);
+            }
+
+            return orchestrateResult;
           }).pipe(Effect.provide(runLayer)),
         );
       } catch (error: unknown) {

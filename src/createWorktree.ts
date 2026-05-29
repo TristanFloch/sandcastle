@@ -28,7 +28,12 @@ import type {
 import type { CloseResult, Sandbox } from "./createSandbox.js";
 import { createSandboxFromWorktree } from "./createSandbox.js";
 import type { InteractiveResult } from "./interactive.js";
-import { buildLogFilename, printFileDisplayStartup } from "./run.js";
+import {
+  buildCompletionMessage,
+  buildContextWindowLines,
+  buildLogFilename,
+  printFileDisplayStartup,
+} from "./run.js";
 import type { LoggingOption } from "./run.js";
 import { orchestrate, type IterationResult } from "./Orchestrator.js";
 import { agentStreamEmitterLayer } from "./AgentStreamEmitter.js";
@@ -632,7 +637,7 @@ export const createWorktree = async (
         const display = yield* Display;
         yield* display.intro(opts.name ?? "sandcastle");
 
-        return yield* orchestrate({
+        const orchestrateResult = yield* orchestrate({
           hostRepoDir,
           iterations: maxIterations,
           hooks,
@@ -647,6 +652,20 @@ export const createWorktree = async (
           skipPromptExpansion: isInlinePrompt,
           timeouts: options.timeouts,
         });
+
+        const completion = buildCompletionMessage(
+          orchestrateResult.completionSignal,
+          orchestrateResult.iterations.length,
+        );
+        yield* display.status(completion.message, completion.severity);
+
+        for (const line of buildContextWindowLines(
+          orchestrateResult.iterations,
+        )) {
+          yield* display.text(line);
+        }
+
+        return orchestrateResult;
       }).pipe(
         Effect.provide(runLayer),
         // Always close sandbox handle
