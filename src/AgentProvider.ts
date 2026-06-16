@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import {
   claudeHostSessionPath,
   claudeSandboxSessionPath,
+  claudeSubagentsDirOnHost,
   encodePiSessionDir,
   findClaudeSessionOnHost,
   findCodexSessionOnHost,
   findPiSessionOnHost,
+  listClaudeSubagentSessionsInSandbox,
   locateCodexHostSession,
   locateCodexSandboxSession,
   locatePiHostSession,
@@ -319,6 +321,34 @@ const writeSandboxFile = async (
   }
 };
 
+/**
+ * Read a Claude JSONL out of the sandbox, rewrite its `cwd` fields from
+ * `fromCwd` → `toCwd`, and write the result to `destPath` on the host. Used
+ * by `captureToHost` for both the main session file and each subagent /
+ * workflow transcript — the read→rewrite→ensure-dir→write sequence is
+ * identical, only the source/dest paths differ.
+ */
+const copyClaudeSessionFile = async ({
+  handle,
+  sourcePath,
+  fromCwd,
+  toCwd,
+  destPath,
+  tag,
+}: {
+  handle: Pick<BindMountSandboxHandle, "copyFileOut">;
+  sourcePath: string;
+  fromCwd: string;
+  toCwd: string;
+  destPath: string;
+  tag: string;
+}): Promise<void> => {
+  const jsonl = await readSandboxFile(handle, sourcePath, tag);
+  const rewritten = transferClaudeSession(jsonl, fromCwd, toCwd);
+  await mkdir(dirname(destPath), { recursive: true });
+  await writeFile(destPath, rewritten);
+};
+
 const makeClaudeSessionStorage = (
   options?: ClaudeCodeOptions,
 ): AgentSessionStorage => {
@@ -338,20 +368,56 @@ const makeClaudeSessionStorage = (
       return readFile(path, "utf-8");
     },
     captureToHost: async ({ hostCwd, sandboxCwd, sessionId, handle }) => {
-      const sandboxPath = claudeSandboxSessionPath(
+      // Main session: failure is fatal — the user expects their session.
+      await copyClaudeSessionFile({
+        handle,
+        sourcePath: claudeSandboxSessionPath(
+          sandboxCwd,
+          sessionId,
+          sandboxProjectsDir,
+        ),
+        fromCwd: sandboxCwd,
+        toCwd: hostCwd,
+        destPath: claudeHostSessionPath(hostCwd, sessionId, hostProjectsDir),
+        tag: "claude-cap",
+      });
+
+      // Subagent / workflow transcripts: best-effort. A missing `subagents/`
+      // dir is the normal case (no Agent-tool / Workflow usage this run);
+      // an individual subagent failing to copy must not abort siblings or
+      // the (already-successful) main capture.
+      const subagentSandboxPaths = await listClaudeSubagentSessionsInSandbox(
         sandboxCwd,
         sessionId,
+        handle,
         sandboxProjectsDir,
       );
-      const jsonl = await readSandboxFile(handle, sandboxPath, "claude-cap");
-      const rewritten = transferClaudeSession(jsonl, sandboxCwd, hostCwd);
-      const hostPath = claudeHostSessionPath(
+      const hostSubagentsDir = claudeSubagentsDirOnHost(
         hostCwd,
         sessionId,
         hostProjectsDir,
       );
-      await mkdir(dirname(hostPath), { recursive: true });
-      await writeFile(hostPath, rewritten);
+      for (const sandboxSubagentPath of subagentSandboxPaths) {
+        try {
+          await copyClaudeSessionFile({
+            handle,
+            sourcePath: sandboxSubagentPath,
+            fromCwd: sandboxCwd,
+            toCwd: hostCwd,
+            destPath: join(
+              hostSubagentsDir,
+              posix.basename(sandboxSubagentPath),
+            ),
+            tag: "claude-sub",
+          });
+        } catch (err) {
+          console.error(
+            `sandcastle: failed to capture Claude subagent transcript ${sandboxSubagentPath}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
     },
     resumeIntoSandbox: async ({ hostCwd, sandboxCwd, sessionId, handle }) => {
       const hostPath = claudeHostSessionPath(
