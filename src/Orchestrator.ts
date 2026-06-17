@@ -242,6 +242,10 @@ export interface OrchestrateOptions {
   readonly hooks?: SandboxHooks;
   readonly prompt: string;
   readonly branch?: string;
+  /** When true, the pull-request strategy is active: SandboxLifecycle
+   *  provisions HTTPS push credentials, normalizes the remote, and disables
+   *  commit signing so the agent can push and open a PR itself. See ADR 0021. */
+  readonly pullRequest?: boolean;
   readonly provider: AgentProvider;
   readonly completionSignal?: string | string[];
   /** Idle timeout in seconds. If the agent produces no output for this long, it fails with AgentIdleTimeoutError. Default: 600 (10 minutes) */
@@ -316,6 +320,7 @@ export const orchestrate = (
     const streamEmitter = yield* AgentStreamEmitter;
     const { hostRepoDir, iterations, hooks, prompt, branch, provider } =
       options;
+    const pullRequest = options.pullRequest ?? false;
     let completionSignals: string[];
     if (options.completionSignal === undefined) {
       completionSignals = [DEFAULT_COMPLETION_SIGNAL];
@@ -354,6 +359,7 @@ export const orchestrate = (
               sandboxRepoDir: sandboxRepoPath,
               hooks,
               branch,
+              pullRequest,
               hostWorktreePath,
               applyToHost,
               signal: options.signal,

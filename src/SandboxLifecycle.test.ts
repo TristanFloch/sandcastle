@@ -9,7 +9,12 @@ import { type DisplayEntry, SilentDisplay } from "./Display.js";
 import { type SandboxService } from "./SandboxFactory.js";
 import { makeLocalSandbox } from "./testSandbox.js";
 import { ExecError, SyncError } from "./errors.js";
-import { withSandboxLifecycle, runHostHooks } from "./SandboxLifecycle.js";
+import {
+  withSandboxLifecycle,
+  runHostHooks,
+  sshToHttpsGitHubUrl,
+  pullRequestGitEnv,
+} from "./SandboxLifecycle.js";
 
 /**
  * Creates a sandbox that translates container paths to host paths,
@@ -1534,5 +1539,53 @@ describe("runHostHooks", () => {
 
     const content = await readFile(join(dir, "timeout-default.txt"), "utf-8");
     expect(content.trim()).toBe("ok");
+  });
+});
+
+describe("sshToHttpsGitHubUrl", () => {
+  it("converts scp-like SSH remotes to HTTPS", () => {
+    expect(sshToHttpsGitHubUrl("git@github.com:owner/repo.git")).toBe(
+      "https://github.com/owner/repo.git",
+    );
+    expect(sshToHttpsGitHubUrl("git@github.com:owner/repo")).toBe(
+      "https://github.com/owner/repo",
+    );
+  });
+
+  it("converts ssh:// protocol remotes to HTTPS", () => {
+    expect(sshToHttpsGitHubUrl("ssh://git@github.com/owner/repo.git")).toBe(
+      "https://github.com/owner/repo.git",
+    );
+  });
+
+  it("returns null for remotes that are already HTTPS", () => {
+    expect(sshToHttpsGitHubUrl("https://github.com/owner/repo.git")).toBeNull();
+  });
+
+  it("returns null for non-GitHub SSH remotes (leaves them untouched)", () => {
+    expect(sshToHttpsGitHubUrl("git@gitlab.com:owner/repo.git")).toBeNull();
+    expect(sshToHttpsGitHubUrl("git@example.com:owner/repo.git")).toBeNull();
+  });
+
+  it("tolerates surrounding whitespace", () => {
+    expect(sshToHttpsGitHubUrl("  git@github.com:owner/repo.git\n")).toBe(
+      "https://github.com/owner/repo.git",
+    );
+  });
+});
+
+describe("pullRequestGitEnv", () => {
+  it("force-disables commit and tag signing via GIT_CONFIG_* env", () => {
+    const env = pullRequestGitEnv();
+    expect(env.GIT_CONFIG_COUNT).toBe("2");
+    const pairs = new Map<string, string>();
+    const count = Number(env.GIT_CONFIG_COUNT);
+    for (let i = 0; i < count; i++) {
+      const key = env[`GIT_CONFIG_KEY_${i}`] ?? "";
+      const value = env[`GIT_CONFIG_VALUE_${i}`] ?? "";
+      pairs.set(key, value);
+    }
+    expect(pairs.get("commit.gpgsign")).toBe("false");
+    expect(pairs.get("tag.gpgsign")).toBe("false");
   });
 });

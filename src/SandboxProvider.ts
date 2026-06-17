@@ -265,22 +265,55 @@ export interface NamedBranchStrategy {
   readonly baseBranch?: string;
 }
 
-/** Branch strategy for bind-mount providers (all three variants). */
+/**
+ * Pull-request strategy: behaves like `branch` (commits land on a named branch
+ * in a worktree, never merged back to HEAD), but Sandcastle additionally
+ * provisions push credentials into the sandbox so the agent can push the branch
+ * and open a pull request itself — linked to the task it worked on — as the
+ * final step of its task. Sandcastle does not run `gh pr create`; only the
+ * agent knows which task it selected. See ADR 0021.
+ *
+ * Auth is HTTPS-only (`GH_TOKEN`, no SSH forwarding) so unattended runs never
+ * hit a passphrase/biometric prompt; commit signing is force-disabled in the
+ * sandbox. Supported on bind-mount and no-sandbox providers only — isolated
+ * providers are excluded (their in-sandbox `origin` is a git bundle, not the
+ * GitHub remote).
+ */
+export interface PullRequestBranchStrategy {
+  readonly type: "pull-request";
+  /**
+   * The source branch the agent works on and opens the PR from. Auto-generated
+   * (`sandcastle/<timestamp>-<random>`) when omitted — which also makes
+   * concurrent `RunResult.fork()` fan-out collision-safe by default.
+   */
+  readonly branch?: string;
+  /**
+   * Git ref to branch from when creating the source branch — same semantics as
+   * `NamedBranchStrategy.baseBranch`. Not the PR's base; the PR base is left to
+   * the agent's `gh pr create` (defaults to the repo's default branch).
+   */
+  readonly baseBranch?: string;
+}
+
+/** Branch strategy for bind-mount providers. */
 export type BindMountBranchStrategy =
   | HeadBranchStrategy
   | MergeToHeadBranchStrategy
-  | NamedBranchStrategy;
+  | NamedBranchStrategy
+  | PullRequestBranchStrategy;
 
-/** Branch strategy for isolated providers (no head — can't write to host). */
+/** Branch strategy for isolated providers (no head — can't write to host; no
+ *  pull-request — the in-sandbox origin is a bundle, not the GitHub remote). */
 export type IsolatedBranchStrategy =
   | MergeToHeadBranchStrategy
   | NamedBranchStrategy;
 
-/** Branch strategy for no-sandbox providers (all three — same as bind-mount). */
+/** Branch strategy for no-sandbox providers (same as bind-mount). */
 export type NoSandboxBranchStrategy =
   | HeadBranchStrategy
   | MergeToHeadBranchStrategy
-  | NamedBranchStrategy;
+  | NamedBranchStrategy
+  | PullRequestBranchStrategy;
 
 /** Union of all branch strategy variants. */
 export type BranchStrategy =

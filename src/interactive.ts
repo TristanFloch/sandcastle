@@ -14,6 +14,7 @@ import {
 import {
   withSandboxLifecycle,
   runHostHooks,
+  pullRequestGitEnv,
   type SandboxHooks,
 } from "./SandboxLifecycle.js";
 import type {
@@ -134,6 +135,17 @@ export const interactive = async (
     );
   }
 
+  // Validate: pull-request strategy is not supported with isolated providers
+  // (their in-sandbox origin is a bundle, not the GitHub remote). See ADR 0021.
+  if (
+    branchStrategy.type === "pull-request" &&
+    resolvedSandbox.tag === "isolated"
+  ) {
+    throw new Error(
+      "pull-request branch strategy is not supported with isolated providers",
+    );
+  }
+
   // Validate: copyToWorktree is incompatible with head strategy
   if (
     branchStrategy.type === "head" &&
@@ -153,8 +165,16 @@ export const interactive = async (
     );
   }
 
+  // pull-request behaves like branch (named worktree, no merge-back) plus the
+  // credential/remote/signing setup in SandboxLifecycle. Resolve its source
+  // branch here, generating one when omitted.
+  const isPullRequest = branchStrategy.type === "pull-request";
   const branch: string | undefined =
-    branchStrategy.type === "branch" ? branchStrategy.branch : undefined;
+    branchStrategy.type === "branch"
+      ? branchStrategy.branch
+      : isPullRequest
+        ? (branchStrategy.branch ?? generateTempBranchName(options.name))
+        : undefined;
 
   const isHeadMode = branchStrategy.type === "head";
   const sandboxProvider = resolvedSandbox;
@@ -173,11 +193,16 @@ export const interactive = async (
 
     // 2. Resolve env vars
     const resolvedEnv = yield* resolveEnv(hostRepoDir);
-    const env = mergeProviderEnv({
+    const mergedEnv = mergeProviderEnv({
       resolvedEnv,
       agentProviderEnv: provider.env,
       sandboxProviderEnv: sandboxProvider.env,
     });
+    // pull-request: force-disable commit signing so commits never hit a signing
+    // prompt (e.g. an SSH signer's biometric). See ADR 0021.
+    const env = isPullRequest
+      ? { ...mergedEnv, ...pullRequestGitEnv() }
+      : mergedEnv;
     const effectiveEnv = { ...env, ...(options.env ?? {}) };
 
     // 3. Capture host's current branch
@@ -365,6 +390,7 @@ export const interactive = async (
           sandboxRepoDir: worktreePath,
           hooks,
           branch: lifecycleBranch,
+          pullRequest: isPullRequest,
           hostWorktreePath: isHeadMode ? hostRepoDir : worktreeInfo?.path,
           applyToHost,
           timeouts: options.timeouts,

@@ -42,6 +42,7 @@ export const formatErrorMessage = (error: SandboxError): string => {
     case "CommitCollectionTimeoutError":
     case "MergeToHostTimeoutError":
     case "SessionCaptureError":
+    case "PullRequestSetupError":
     case "CwdError":
       return error.message;
   }

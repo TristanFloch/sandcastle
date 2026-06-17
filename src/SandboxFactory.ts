@@ -304,12 +304,13 @@ export const WorktreeDockerSandboxFactory = {
       } = yield* SandboxConfig;
 
       const isHeadMode = branchStrategy.type === "head";
-      const branch =
-        branchStrategy.type === "branch" ? branchStrategy.branch : undefined;
-      const baseBranch =
-        branchStrategy.type === "branch"
-          ? branchStrategy.baseBranch
-          : undefined;
+      // pull-request creates a worktree on a named branch exactly like `branch`
+      // (run.ts has already pinned a concrete branch name onto the strategy).
+      const isNamedOrPr =
+        branchStrategy.type === "branch" ||
+        branchStrategy.type === "pull-request";
+      const branch = isNamedOrPr ? branchStrategy.branch : undefined;
+      const baseBranch = isNamedOrPr ? branchStrategy.baseBranch : undefined;
       const fileSystem = yield* FileSystem.FileSystem;
       const display = yield* Display;
 

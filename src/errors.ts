@@ -15,6 +15,15 @@ export class ExecHostError extends Data.TaggedError("ExecHostError")<{
   readonly command: string;
 }> {}
 
+/** Pre-flight check failed for the pull-request branch strategy (missing
+ *  `GH_TOKEN`/`GITHUB_TOKEN`, `origin` is not a GitHub remote, or `gh` is not
+ *  installed) — raised before the agent runs so the run fails fast. See ADR 0021. */
+export class PullRequestSetupError extends Data.TaggedError(
+  "PullRequestSetupError",
+)<{
+  readonly message: string;
+}> {}
+
 /** File copy between host and sandbox failed */
 export class CopyError extends Data.TaggedError("CopyError")<{
   readonly message: string;
@@ -217,4 +226,5 @@ export type SandboxError =
   | PromptExpansionTimeoutError
   | CommitCollectionTimeoutError
   | MergeToHostTimeoutError
+  | PullRequestSetupError
   | SessionCaptureError;

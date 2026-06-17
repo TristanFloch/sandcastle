@@ -31,6 +31,7 @@ import {
   type AgentStreamEvent,
 } from "./AgentStreamEmitter.js";
 import type { SandboxHooks } from "./SandboxLifecycle.js";
+import { pullRequestGitEnv } from "./SandboxLifecycle.js";
 import { mergeProviderEnv } from "./mergeProviderEnv.js";
 import { generateTempBranchName, getCurrentBranch } from "./WorktreeManager.js";
 import {
@@ -397,6 +398,20 @@ export async function run(
     );
   }
 
+  // Validate: pull-request strategy is not supported with isolated providers.
+  // (The type system excludes it from IsolatedBranchStrategy, but run()'s
+  // option type is the broad BranchStrategy, so guard at runtime too.) An
+  // isolated sandbox clones from a git bundle, so its in-sandbox origin is not
+  // the GitHub remote and it cannot push a PR branch. See ADR 0021.
+  if (
+    effectiveBranchType === "pull-request" &&
+    options.sandbox.tag === "isolated"
+  ) {
+    throw new Error(
+      "pull-request branch strategy is not supported with isolated providers",
+    );
+  }
+
   // Validate: copyToWorktree is incompatible with head strategy
   if (
     effectiveBranchType === "head" &&
@@ -434,9 +449,26 @@ export async function run(
     );
   }
 
-  // Extract explicit branch when in branch mode
+  // pull-request behaves like branch (named branch, no merge-back), plus the
+  // credential/remote/signing setup performed in SandboxLifecycle.
+  const isPullRequest = effectiveBranchType === "pull-request";
+
+  // Extract explicit branch when in branch/pull-request mode. pull-request
+  // resolves its source branch here (generated when omitted) so the same
+  // concrete name flows to both worktree creation and the orchestrator.
   const branch: string | undefined =
-    branchStrategy.type === "branch" ? branchStrategy.branch : undefined;
+    branchStrategy.type === "branch"
+      ? branchStrategy.branch
+      : isPullRequest
+        ? (branchStrategy.branch ?? generateTempBranchName(options.name))
+        : undefined;
+
+  // Pin the resolved source branch onto the strategy so SandboxFactory creates
+  // the worktree on the exact branch the orchestrator/lifecycle reference.
+  const resolvedBranchStrategy: BranchStrategy =
+    branchStrategy.type === "pull-request" && branch
+      ? { type: "pull-request", branch, baseBranch: branchStrategy.baseBranch }
+      : branchStrategy;
 
   const hostRepoDir = await Effect.runPromise(
     resolveCwd(options.cwd).pipe(Effect.provide(NodeContext.layer)),
@@ -478,11 +510,16 @@ export async function run(
   const resolvedEnv = await Effect.runPromise(
     resolveEnv(hostRepoDir).pipe(Effect.provide(NodeContext.layer)),
   );
-  const env = mergeProviderEnv({
+  const mergedEnv = mergeProviderEnv({
     resolvedEnv,
     agentProviderEnv: provider.env,
     sandboxProviderEnv: options.sandbox.env,
   });
+  // pull-request: force-disable commit signing so unattended commits never hit
+  // a signing prompt (e.g. an SSH signer's biometric). See ADR 0021.
+  const env = isPullRequest
+    ? { ...mergedEnv, ...pullRequestGitEnv() }
+    : mergedEnv;
 
   // Always capture the host's current branch for the TARGET_BRANCH built-in
   // prompt argument. When using a temp branch, it also prefixes the log filename.
@@ -537,7 +574,7 @@ export async function run(
         copyToWorktree: options.copyToWorktree,
         name: options.name,
         sandboxProvider: options.sandbox,
-        branchStrategy,
+        branchStrategy: resolvedBranchStrategy,
         hooks,
         signal: options.signal,
         timeouts: options.timeouts,
@@ -605,6 +642,7 @@ export async function run(
       hooks,
       prompt: resolvedPrompt,
       branch: orchestrateBranch,
+      pullRequest: isPullRequest,
       provider,
       completionSignal: options.completionSignal,
       idleTimeoutSeconds: options.idleTimeoutSeconds,
