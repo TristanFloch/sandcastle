@@ -723,6 +723,7 @@ try {
 | ------------------------------ | ------------------------------------------------------------------------- |
 | `blank`                        | Bare scaffold — write your own prompt and orchestration                   |
 | `simple-loop`                  | Picks issues one by one and closes them                                   |
+| `pull-request-loop`            | Picks issues one by one and opens a pull request for each                 |
 | `sequential-reviewer`          | Implements issues one by one, with a code review step after each          |
 | `parallel-planner`             | Plans parallelizable issues, executes on separate branches, then merges   |
 | `parallel-planner-with-review` | Plans parallelizable issues, executes with per-branch review, then merges |

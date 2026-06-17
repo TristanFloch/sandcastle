@@ -7,3 +7,5 @@ Add a `pull-request` branch strategy. It behaves like `branch` (commits land on 
 Auth is HTTPS-only via `GH_TOKEN`/`GITHUB_TOKEN` (no SSH forwarding, so unattended runs never hit a passphrase/biometric prompt). The strategy fails fast before the agent runs if `gh` is missing, no token is set, or `origin` is not a GitHub remote. `branch` is optional and auto-generated (`sandcastle/…`) when omitted, making concurrent `fork()` fan-out collision-safe.
 
 Supported on bind-mount and no-sandbox providers only — isolated providers are excluded (their in-sandbox `origin` is a git bundle, not the GitHub remote). See ADR 0021.
+
+`init` also gains a `pull-request-loop` template — a single-issue loop that uses the new strategy and ships a prompt instructing the agent to push and open a PR (`{{CREATE_PR_COMMAND}}`).
