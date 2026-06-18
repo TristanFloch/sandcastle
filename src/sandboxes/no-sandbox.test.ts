@@ -96,6 +96,10 @@ describe("noSandbox", () => {
     itWindows(
       "exec passes env vars to spawned processes (cmd.exe)",
       async () => {
+        // Doubles as the regression test for issue #800: `%VAR%` only expands
+        // when the command runs through cmd.exe — if `exec` were still spawning
+        // `sh -c`, this would either fail with `spawn sh ENOENT` (no `sh` on a
+        // stock Windows PATH) or echo back the literal `%MY_TEST_VAR%`.
         const provider = noSandbox();
         const handle = await provider.create({
           worktreePath: process.cwd(),
@@ -104,25 +108,6 @@ describe("noSandbox", () => {
 
         const result = await handle.exec("echo %MY_TEST_VAR%");
         expect(result.stdout.trim()).toBe("sandcastle_test_value");
-      },
-    );
-
-    itWindows(
-      "exec routes commands through cmd.exe so `sh` is not required",
-      async () => {
-        // Reproduction of issue #800: `git config --global --add safe.directory …`
-        // dies with `spawn sh ENOENT` in a stock PowerShell session. After the
-        // fix it should run via cmd.exe with no `sh` on PATH.
-        const provider = noSandbox();
-        const handle = await provider.create({
-          worktreePath: process.cwd(),
-          env: {},
-        });
-
-        const result = await handle.exec(
-          'git config --global --add safe.directory "C:\\tmp\\sandcastle-test"',
-        );
-        expect(result.exitCode).toBe(0);
       },
     );
 
