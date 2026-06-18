@@ -58,6 +58,10 @@ _Avoid_: `"temp-branch"` (old name), "auto-branch"
 A **branch strategy** where commits land on an explicitly named branch provided by the caller.
 _Avoid_: "named-branch"
 
+**Pull-request (branch strategy)**:
+A **branch strategy** that behaves like **branch** (commits land on a named branch in a **worktree**) but additionally provisions push credentials into the **sandbox** so the **agent** can push the branch to the remote and open a pull request itself, linked to the **task** it worked on. Sandcastle does not run `gh pr create` -- the **agent** owns both the push and the PR, as the final step of its **task**, because only the agent knows which **task** it selected. The strategy's distinct work is credential/remote provisioning plus a **prompt template** convention instructing the agent to publish. Both the push and `gh pr create` authenticate over HTTPS with a GitHub token (no SSH, so unattended runs never hit a biometric/passphrase prompt); an SSH `origin` is normalized to an HTTPS push URL. Commit signing is force-disabled in the sandbox (via `GIT_CONFIG_*` env) so the agent commits without a signing prompt. Supported on **bind-mount** and **no-sandbox sandbox providers** only -- **isolated sandbox providers** are excluded at the type level because their in-sandbox `origin` is a git bundle, not the GitHub remote, so they cannot push a PR branch to GitHub.
+_Avoid_: "merge strategy" (PRs defer the merge, they don't perform it), "PR strategy", "auto-pr"
+
 **Worktree**:
 A git worktree created in `.sandcastle/worktrees/` on the **host**, used by the **merge-to-head** and **branch** strategies. For **bind-mount sandbox providers**, the **worktree** is mounted into the **sandbox**. For **isolated sandbox providers**, the **worktree** is the sync source/destination -- commits from the **sandbox** are pulled back into the **worktree**. Created explicitly via `createWorktree()` or implicitly by `run()`/`interactive()` when using a non-**head** **branch strategy**.
 _Avoid_: "workspace", "branch copy", "clone"

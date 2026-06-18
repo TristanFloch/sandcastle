@@ -1,0 +1,4 @@
+{
+  "name": "pull-request-loop",
+  "description": "Picks issues one by one and opens a pull request for each"
+}

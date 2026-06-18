@@ -95,4 +95,5 @@ export type {
   HeadBranchStrategy,
   MergeToHeadBranchStrategy,
   NamedBranchStrategy,
+  PullRequestBranchStrategy,
 } from "./SandboxProvider.js";

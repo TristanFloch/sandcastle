@@ -370,6 +370,58 @@ describe("InitService scaffold", () => {
     expect(prompt).toContain("<promise>COMPLETE</promise>");
   });
 
+  describe("pull-request-loop template", () => {
+    it("appears in listTemplates()", () => {
+      const templates = listTemplates();
+      expect(templates.map((t) => t.name)).toContain("pull-request-loop");
+    });
+
+    it("produces main.mts and prompt.md", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "pull-request-loop" });
+
+      const configDir = join(dir, ".sandcastle");
+      const { access } = await import("node:fs/promises");
+
+      await expect(
+        access(join(configDir, "main.mts")),
+      ).resolves.toBeUndefined();
+      await expect(
+        access(join(configDir, "prompt.md")),
+      ).resolves.toBeUndefined();
+    });
+
+    it("main.mts uses the pull-request branch strategy", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "pull-request-loop" });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(mainTs).toContain('branchStrategy: { type: "pull-request" }');
+    });
+
+    it("prompt.md substitutes CREATE_PR_COMMAND with the gh pr create instruction", async () => {
+      const dir = await makeDir();
+      // issueTracker defaults to github-issues.
+      await runScaffold(dir, { templateName: "pull-request-loop" });
+
+      const prompt = await readFile(
+        join(dir, ".sandcastle", "prompt.md"),
+        "utf-8",
+      );
+      // The {{CREATE_PR_COMMAND}} placeholder is replaced...
+      expect(prompt).not.toContain("{{CREATE_PR_COMMAND}}");
+      // ...with the github-issues PR command.
+      expect(prompt).toContain("gh pr create");
+      expect(prompt).toContain("git push -u origin HEAD");
+      // The agent opens a PR rather than closing the issue directly.
+      expect(prompt).toContain("Submit a pull request");
+      expect(prompt).toContain("<promise>COMPLETE</promise>");
+    });
+  });
+
   describe("sequential-reviewer template", () => {
     it("produces main.mts, implement-prompt.md, and review-prompt.md", async () => {
       const dir = await makeDir();

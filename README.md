@@ -506,15 +506,41 @@ await sandbox.close();
 
 ## How it works
 
-Sandcastle uses a **branch strategy** configured on the sandbox provider to control how the agent's changes relate to branches. There are three strategies:
+Sandcastle uses a **branch strategy** configured on the sandbox provider to control how the agent's changes relate to branches. There are four strategies:
 
 - **Head** (`{ type: "head" }`) — The agent writes directly to the host working directory. No worktree, no branch indirection. This is the default for bind-mount providers like `docker()`.
 - **Merge-to-head** (`{ type: "merge-to-head" }`) — Sandcastle creates a temporary branch in a git worktree. The agent works on the temp branch, and changes are merged back to HEAD when done. The temp branch is cleaned up after merge.
 - **Branch** (`{ type: "branch", branch: "foo" }`) — Commits land on an explicitly named branch in a git worktree. Re-running with the same branch reuses the existing worktree and fast-forwards it from `origin` when safe — see [ADR 0003](docs/adr/0003-reuse-worktree-by-default.md).
+- **Pull-request** (`{ type: "pull-request" }`) — Behaves like `branch`, but Sandcastle additionally provisions HTTPS push credentials into the sandbox so the **agent** can push the branch and open a pull request itself — linked to the task it worked on — as the final step of its task. `branch` is optional (auto-generated when omitted). Bind-mount and no-sandbox providers only. See [ADR 0021](docs/adr/0021-agent-owns-pull-request-creation.md) and the dedicated section below.
 
 For bind-mount providers (like Docker), the worktree directory is bind-mounted into the container — the agent writes directly to the host filesystem through the mount, so no sync is needed.
 
 From your point of view, you just configure `branchStrategy: { type: 'branch', branch: 'foo' }` on `run()`, and get a commit on branch `foo` once it's complete. All 100% local.
+
+### Pull-request strategy
+
+With `branchStrategy: { type: "pull-request" }`, Sandcastle wires up token-based HTTPS pushing inside the sandbox and the **agent** opens the PR itself. Sandcastle never runs `gh pr create` — only the agent knows which task it selected, so it is the one that writes `Closes #<ID>` (see [ADR 0021](docs/adr/0021-agent-owns-pull-request-creation.md)).
+
+During "Setting up sandbox", Sandcastle:
+
+1. Fails fast if `gh` is missing, no `GH_TOKEN`/`GITHUB_TOKEN` is set, or `origin` is not a GitHub remote.
+2. Normalizes an SSH `origin` to an HTTPS push URL.
+3. Runs `gh auth setup-git` so `git push` rides the token.
+4. Disables commit signing (via `GIT_CONFIG_*`) so unattended commits never hit a passphrase/biometric prompt.
+
+Requirements:
+
+- **Token scopes**: `GH_TOKEN` (or `GITHUB_TOKEN`) needs **Contents (Read and write)** and **Pull requests (Read and write)**, in addition to whatever your issue tracker needs.
+- **Your prompt must instruct the agent to publish.** Sandcastle provisions the credentials but does not inject the instruction. Add something like this to your prompt, so the agent runs it as the final step of its task:
+
+  ```
+  When the task is complete, push the branch and open a PR:
+  git push -u origin HEAD && gh pr create --fill --body "Closes #<the issue you worked on>"
+  ```
+
+- **Providers**: bind-mount (e.g. `docker()`) and no-sandbox only. Isolated providers are excluded at the type level — their in-sandbox `origin` is a git bundle, not the GitHub remote.
+
+`branch` is optional; when omitted, a `sandcastle/…` branch is generated, which also makes concurrent `RunResult.fork()` fan-out collision-safe.
 
 ## Prompts
 
@@ -697,6 +723,7 @@ try {
 | ------------------------------ | ------------------------------------------------------------------------- |
 | `blank`                        | Bare scaffold — write your own prompt and orchestration                   |
 | `simple-loop`                  | Picks issues one by one and closes them                                   |
+| `pull-request-loop`            | Picks issues one by one and opens a pull request for each                 |
 | `sequential-reviewer`          | Implements issues one by one, with a code review step after each          |
 | `parallel-planner`             | Plans parallelizable issues, executes on separate branches, then merges   |
 | `parallel-planner-with-review` | Plans parallelizable issues, executes with per-branch review, then merges |
@@ -784,7 +811,7 @@ Removes the Podman image.
 | `hooks`                    | SandboxHooks       | —                             | Lifecycle hooks (`host.*`, `sandbox.*`)                                                                                                                                                                                      |
 | `name`                     | string             | —                             | Display name for the run, shown as a prefix in log output                                                                                                                                                                    |
 | `promptArgs`               | PromptArgs         | —                             | Key-value map for `{{KEY}}` placeholder substitution                                                                                                                                                                         |
-| `branchStrategy`           | BranchStrategy     | per-provider default          | Branch strategy: `{ type: 'head' }`, `{ type: 'merge-to-head' }`, or `{ type: 'branch', branch: '…' }`                                                                                                                       |
+| `branchStrategy`           | BranchStrategy     | per-provider default          | Branch strategy: `{ type: 'head' }`, `{ type: 'merge-to-head' }`, `{ type: 'branch', branch: '…' }`, or `{ type: 'pull-request' }` (agent pushes + opens a PR; bind-mount/no-sandbox only — see Pull-request strategy)       |
 | `copyToWorktree`           | string[]           | —                             | Host-relative file paths to copy into the sandbox before start (not supported with `branchStrategy: { type: 'head' }`)                                                                                                       |
 | `logging`                  | object             | file (auto-generated)         | `{ type: 'file', path }` or `{ type: 'stdout' }`                                                                                                                                                                             |
 | `completionSignal`         | string \| string[] | `<promise>COMPLETE</promise>` | String or array of strings the agent emits to stop the iteration loop early                                                                                                                                                  |

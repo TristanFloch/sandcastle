@@ -39,6 +39,10 @@ const TEMPLATES: TemplateMetadata[] = [
     description: "Picks issues one by one and closes them",
   },
   {
+    name: "pull-request-loop",
+    description: "Picks issues one by one and opens a pull request for each",
+  },
+  {
     name: "sequential-reviewer",
     description:
       "Implements issues one by one, with a code review step after each",
@@ -488,6 +492,10 @@ export interface IssueTrackerEntry {
     readonly LIST_TASKS_COMMAND: string;
     readonly VIEW_TASK_COMMAND: string;
     readonly CLOSE_TASK_COMMAND: string;
+    /** Command the agent runs to publish its work as a pull request — used by
+     *  the `pull-request-loop` template's prompt. The PR closes the task on
+     *  merge, so this replaces (rather than accompanies) CLOSE_TASK_COMMAND. */
+    readonly CREATE_PR_COMMAND: string;
     readonly ISSUE_TRACKER_TOOLS: string;
   };
   /** Lines to append to `.env.example` for this issue tracker, or empty string if none needed. */
@@ -523,6 +531,7 @@ RUN corepack enable`;
 const CUSTOM_LIST_TASKS_SENTINEL = `echo 'No issue tracker configured — run ${SETUP_ISSUE_TRACKER_PATH} through your coding agent.' >&2; exit 1`;
 const CUSTOM_VIEW_TASK_MARKER = `<view command — see ${SETUP_ISSUE_TRACKER_PATH}>`;
 const CUSTOM_CLOSE_TASK_MARKER = `<close command — see ${SETUP_ISSUE_TRACKER_PATH}>`;
+const CUSTOM_CREATE_PR_MARKER = `<create-PR command — see ${SETUP_ISSUE_TRACKER_PATH}>`;
 const CUSTOM_TRACKER_TOOLS = `# TODO: install your issue tracker's CLI here. See ${SETUP_ISSUE_TRACKER_PATH}`;
 const CUSTOM_ENV_EXAMPLE = `# TODO: add any env vars your issue tracker needs (e.g. an API token).
 # See ${SETUP_ISSUE_TRACKER_PATH}`;
@@ -535,11 +544,14 @@ const ISSUE_TRACKER_REGISTRY: IssueTrackerEntry[] = [
       LIST_TASKS_COMMAND: `gh issue list --state open --label Sandcastle --limit 100 --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'`,
       VIEW_TASK_COMMAND: "gh issue view <ID>",
       CLOSE_TASK_COMMAND: `gh issue close <ID> --comment "Completed by Sandcastle"`,
+      CREATE_PR_COMMAND: `git push -u origin HEAD && gh pr create --fill --body "Closes #<ID>"`,
       ISSUE_TRACKER_TOOLS: GITHUB_CLI_TOOLS,
     },
     envExample: `# GitHub personal access token — the agent uses it to read and manage GitHub Issues
 # Create a fine-grained token: https://github.com/settings/personal-access-tokens/new
 # Required repository permissions: Issues (Read and write) and Metadata (Read)
+# For the pull-request branch strategy, also grant: Contents (Read and write)
+# and Pull requests (Read and write), so the agent can push and open a PR.
 GH_TOKEN=`,
   },
   {
@@ -549,6 +561,7 @@ GH_TOKEN=`,
       LIST_TASKS_COMMAND: "bd ready --json",
       VIEW_TASK_COMMAND: "bd show <ID>",
       CLOSE_TASK_COMMAND: `bd close <ID> --reason="Completed by Sandcastle"`,
+      CREATE_PR_COMMAND: `git push -u origin HEAD && gh pr create --fill --body "Implements <ID>"`,
       ISSUE_TRACKER_TOOLS: BEADS_TOOLS,
     },
     envExample: "",
@@ -564,6 +577,7 @@ GH_TOKEN=`,
       // Inline text markers — replaced by the setup agent, never executed.
       VIEW_TASK_COMMAND: CUSTOM_VIEW_TASK_MARKER,
       CLOSE_TASK_COMMAND: CUSTOM_CLOSE_TASK_MARKER,
+      CREATE_PR_COMMAND: CUSTOM_CREATE_PR_MARKER,
       ISSUE_TRACKER_TOOLS: CUSTOM_TRACKER_TOOLS,
     },
     envExample: CUSTOM_ENV_EXAMPLE,
@@ -685,6 +699,11 @@ export function getNextStepsLines(
     if (hasReviewer) {
       lines.push(
         `${step++}. Customize .sandcastle/CODING_STANDARDS.md with your project's standards — the reviewer agent loads it during review`,
+      );
+    }
+    if (template === "pull-request-loop") {
+      lines.push(
+        `${step++}. The agent pushes and opens a PR itself — make sure GH_TOKEN has Contents (Read and write) and Pull requests (Read and write) scopes, and that \`gh\` is installed in the sandbox image`,
       );
     }
     lines.push(`${step++}. Run \`npm run sandcastle\` to start the agent`);

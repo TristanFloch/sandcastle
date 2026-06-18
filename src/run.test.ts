@@ -507,6 +507,30 @@ describe("branchStrategy on RunOptions", () => {
       "head branch strategy is not supported with isolated providers",
     );
   });
+
+  it("throws when pull-request strategy is used with an isolated provider", async () => {
+    const isolatedSandbox = sandcastle.createIsolatedSandboxProvider({
+      name: "test-isolated",
+      create: async () => ({
+        worktreePath: "/workspace",
+        exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+        copyIn: async () => {},
+        copyFileOut: async () => {},
+        close: async () => {},
+      }),
+    });
+
+    await expect(
+      run({
+        agent: claudeCode("claude-opus-4-7"),
+        sandbox: isolatedSandbox,
+        prompt: "test",
+        branchStrategy: { type: "pull-request" },
+      }),
+    ).rejects.toThrow(
+      "pull-request branch strategy is not supported with isolated providers",
+    );
+  });
 });
 
 describe("buildRunSummaryRows", () => {

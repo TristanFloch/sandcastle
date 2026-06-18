@@ -8,6 +8,7 @@ import {
   GitSetupTimeoutError,
   HookTimeoutError,
   MergeToHostTimeoutError,
+  PullRequestSetupError,
   SyncError,
   withTimeout,
   type SandboxError,
@@ -83,6 +84,121 @@ const execOkWithGitTimeout = (
 
 const execAsync = promisify(exec);
 
+/**
+ * Git config env that force-disables commit and tag signing in the sandbox,
+ * injected at sandbox creation for the pull-request strategy. Uses `GIT_CONFIG_*`
+ * so it overrides any inherited (global or repo-local) signing config without
+ * mutating a config file — keeping unattended runs free of signing prompts
+ * (e.g. an SSH signer gated behind a passphrase or biometric). See ADR 0021.
+ */
+export const pullRequestGitEnv = (): Record<string, string> => ({
+  GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_KEY_0: "commit.gpgsign",
+  GIT_CONFIG_VALUE_0: "false",
+  GIT_CONFIG_KEY_1: "tag.gpgsign",
+  GIT_CONFIG_VALUE_1: "false",
+});
+
+/**
+ * Convert a GitHub SSH remote URL to its HTTPS equivalent so a token-based push
+ * works. Returns null for URLs that are already HTTPS or aren't recognizable
+ * GitHub SSH remotes (the caller leaves those untouched).
+ */
+export const sshToHttpsGitHubUrl = (url: string): string | null => {
+  const trimmed = url.trim();
+  // scp-like: git@github.com:owner/repo(.git)
+  const scpLike = /^git@github\.com:(.+)$/.exec(trimmed);
+  if (scpLike) return `https://github.com/${scpLike[1]}`;
+  // ssh://git@github.com/owner/repo(.git)
+  const sshProto = /^ssh:\/\/git@github\.com\/(.+)$/.exec(trimmed);
+  if (sshProto) return `https://github.com/${sshProto[1]}`;
+  return null;
+};
+
+/**
+ * Pull-request strategy setup, run inside the sandbox during "Setting up
+ * sandbox" (see ADR 0021). Fails fast (PullRequestSetupError) when a
+ * precondition is missing, then wires up token-based HTTPS pushing so the agent
+ * can push and open a PR itself:
+ *
+ *   1. Pre-flight: `gh` installed, `GH_TOKEN`/`GITHUB_TOKEN` present, `origin`
+ *      is a GitHub remote.
+ *   2. Normalize an SSH `origin` to an HTTPS push URL.
+ *   3. `gh auth setup-git` so plain `git push` rides the token.
+ *
+ * Commit signing is disabled separately via `GIT_CONFIG_*` env injected at
+ * sandbox creation (run.ts / interactive.ts), not here.
+ */
+const setupPullRequest = (
+  sandbox: SandboxService,
+  cwd: string,
+  gitSetupTimeoutMs: number,
+): Effect.Effect<
+  void,
+  ExecError | GitSetupTimeoutError | PullRequestSetupError
+> =>
+  Effect.gen(function* () {
+    const fail = (message: string) =>
+      Effect.fail(new PullRequestSetupError({ message }));
+
+    // 1. Pre-flight — `gh` installed.
+    const ghCheck = yield* sandbox.exec("command -v gh");
+    if (ghCheck.exitCode !== 0) {
+      return yield* fail(
+        "The pull-request branch strategy requires the GitHub CLI (`gh`) in " +
+          "the sandbox image, but `gh` was not found. Install it in your Dockerfile.",
+      );
+    }
+
+    // 1. Pre-flight — a token is present for HTTPS auth.
+    const tokenCheck = yield* sandbox.exec(
+      'test -n "${GH_TOKEN:-}" || test -n "${GITHUB_TOKEN:-}"',
+    );
+    if (tokenCheck.exitCode !== 0) {
+      return yield* fail(
+        "The pull-request branch strategy needs GH_TOKEN (or GITHUB_TOKEN) in " +
+          "the sandbox env to push and open a PR. Set it in .sandcastle/.env " +
+          "with Contents (Read and write) and Pull requests (Read and write) scopes.",
+      );
+    }
+
+    // 1. Pre-flight — `origin` exists and is a GitHub remote.
+    const originResult = yield* sandbox.exec("git remote get-url origin", {
+      cwd,
+    });
+    const originUrl = originResult.stdout.trim();
+    if (originResult.exitCode !== 0 || originUrl === "") {
+      return yield* fail(
+        "The pull-request branch strategy requires an `origin` remote, but none " +
+          "is configured in this repository.",
+      );
+    }
+    if (!originUrl.includes("github.com")) {
+      return yield* fail(
+        `The pull-request branch strategy only supports GitHub remotes, but ` +
+          `origin is '${originUrl}'.`,
+      );
+    }
+
+    // 2. Normalize an SSH origin to HTTPS so the token can authenticate the push.
+    const httpsUrl = sshToHttpsGitHubUrl(originUrl);
+    if (httpsUrl) {
+      yield* execOkWithGitTimeout(
+        sandbox,
+        `git remote set-url origin "${httpsUrl}"`,
+        gitSetupTimeoutMs,
+        { cwd },
+      );
+    }
+
+    // 3. Register gh as git's HTTPS credential helper so `git push` rides the token.
+    yield* execOkWithGitTimeout(
+      sandbox,
+      "gh auth setup-git",
+      gitSetupTimeoutMs,
+    );
+  });
+
 export type SandboxHooks = {
   readonly host?: {
     readonly onWorktreeReady?: ReadonlyArray<{
@@ -145,6 +261,11 @@ export interface SandboxLifecycleOptions {
   readonly sandboxRepoDir: string;
   readonly hooks?: SandboxHooks;
   readonly branch?: string;
+  /** When true, the pull-request strategy is active: provision HTTPS push
+   *  credentials (`gh auth setup-git`), normalize an SSH `origin` to an HTTPS
+   *  push URL, and disable commit signing in the sandbox — all during the
+   *  "Setting up sandbox" step, after a fail-fast pre-flight check. See ADR 0021. */
+  readonly pullRequest?: boolean;
   /** Host-side path to the worktree directory. Required when sandboxRepoDir
    *  is a sandbox path that doesn't exist on the host (e.g. /home/agent/workspace). */
   readonly hostWorktreePath?: string;
@@ -258,6 +379,12 @@ export const withSandboxLifecycle = <A>(
           gitSetupTimeoutMs,
           { cwd: sandboxRepoDir },
         )).stdout.trim();
+
+        // Pull-request strategy: pre-flight + token-based HTTPS push setup so
+        // the agent can push the branch and open a PR itself (ADR 0021).
+        if (options.pullRequest) {
+          yield* setupPullRequest(sandbox, sandboxRepoDir, gitSetupTimeoutMs);
+        }
 
         // Run sandbox.onSandboxReady and host.onSandboxReady in parallel
         const sandboxHooks = hooks?.sandbox?.onSandboxReady;
