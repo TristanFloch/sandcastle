@@ -9,8 +9,10 @@ import { existsSync, statSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { isAbsolute, resolve, join, dirname } from "node:path";
 import { mkdtemp, writeFile } from "node:fs/promises";
+import { Effect } from "effect";
 import type { MountConfig } from "./MountConfig.js";
 import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
+import { WorktreeError } from "./errors.js";
 
 /**
  * SELinux volume label suffix applied to bind mounts.
@@ -211,95 +213,117 @@ export const parseGitdirPath = (
  * @param statFile - Stat a file to check if it's a directory (injectable for tests).
  * @param platform - Override for `process.platform` (injectable for tests).
  */
-export const patchGitMountsForWindows = async (
+export const patchGitMountsForWindows = (
   gitMounts: Array<{ hostPath: string; sandboxPath: string }>,
   worktreeHostPath: string,
   sandboxRepoDir: string,
   readFile?: (path: string) => Promise<string>,
   statFile?: (path: string) => Promise<"file" | "directory">,
   platform: string = process.platform,
-): Promise<Array<{ hostPath: string; sandboxPath: string }>> => {
-  if (platform !== "win32") return gitMounts;
+): Effect.Effect<
+  Array<{ hostPath: string; sandboxPath: string }>,
+  WorktreeError
+> =>
+  Effect.gen(function* () {
+    if (platform !== "win32") return gitMounts;
 
-  const _readFile =
-    readFile ??
-    (async (p: string) => {
-      const { readFile: rf } = await import("node:fs/promises");
-      return rf(p, "utf-8");
+    const _readFile =
+      readFile ??
+      (async (p: string) => {
+        const { readFile: rf } = await import("node:fs/promises");
+        return rf(p, "utf-8");
+      });
+    const _statFile =
+      statFile ??
+      (async (p: string) => {
+        const { stat } = await import("node:fs/promises");
+        const s = await stat(p);
+        return s.isDirectory() ? ("directory" as const) : ("file" as const);
+      });
+
+    // Check the worktree's .git entry
+    const gitEntryPath = join(worktreeHostPath, ".git");
+    const gitEntryType = yield* Effect.tryPromise({
+      try: () => _statFile(gitEntryPath),
+      catch: () => null,
+    }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+    if (gitEntryType === null) return gitMounts;
+    // .git is a directory (normal clone): no gitdir indirection to fix.
+    // `normalizeMounts` already remaps the .git mount to `${sandboxRepoDir}/.git`
+    // because the host .git sits under `worktreeHostPath`. Removing this short-
+    // circuit would break head mode against a normal clone.
+    if (gitEntryType === "directory") return gitMounts;
+
+    // Read and parse the gitdir: line
+    const content = yield* Effect.tryPromise({
+      try: () => _readFile(gitEntryPath),
+      catch: () => null,
+    }).pipe(
+      Effect.map((s) => s.trim()),
+      Effect.catchAll(() => Effect.succeed(null)),
+    );
+    if (content === null) return gitMounts;
+    const match = content.match(/^gitdir:\s*(.+)$/);
+    if (!match) return gitMounts;
+
+    const gitdirPath = match[1]!;
+    const { parentGitDir, worktreeName } = parseGitdirPath(gitdirPath);
+
+    // Create a temp file with the corrected gitdir content
+    const correctedGitdir = `${PARENT_GIT_SANDBOX_DIR}/worktrees/${worktreeName}`;
+    const tempDir = yield* Effect.tryPromise({
+      try: () => mkdtemp(join(tmpdir(), "sandcastle-git-")),
+      catch: (e) =>
+        new WorktreeError({
+          message: `Failed to create temp dir for git override: ${e instanceof Error ? e.message : String(e)}`,
+        }),
     });
-  const _statFile =
-    statFile ??
-    (async (p: string) => {
-      const { stat } = await import("node:fs/promises");
-      const s = await stat(p);
-      return s.isDirectory() ? ("directory" as const) : ("file" as const);
+    const tempGitFile = join(tempDir, "git-override");
+    yield* Effect.tryPromise({
+      try: () => writeFile(tempGitFile, `gitdir: ${correctedGitdir}\n`),
+      catch: (e) =>
+        new WorktreeError({
+          message: `Failed to write git override file: ${e instanceof Error ? e.message : String(e)}`,
+        }),
     });
 
-  // Check the worktree's .git entry
-  const gitEntryPath = join(worktreeHostPath, ".git");
-  let gitEntryType: "file" | "directory";
-  try {
-    gitEntryType = await _statFile(gitEntryPath);
-  } catch {
-    return gitMounts;
-  }
-  if (gitEntryType === "directory") return gitMounts;
+    // Build corrected mounts
+    const normalizedParentGitDir = parentGitDir.replace(/\\/g, "/");
+    const gitFileHostPath = gitEntryPath.replace(/\\/g, "/");
 
-  // Read and parse the gitdir: line
-  let content: string;
-  try {
-    content = (await _readFile(gitEntryPath)).trim();
-  } catch {
-    return gitMounts;
-  }
-  const match = content.match(/^gitdir:\s*(.+)$/);
-  if (!match) return gitMounts;
+    const correctedMounts: Array<{ hostPath: string; sandboxPath: string }> =
+      [];
+    let replacedGitFile = false;
 
-  const gitdirPath = match[1]!;
-  const { parentGitDir, worktreeName } = parseGitdirPath(gitdirPath);
+    for (const m of gitMounts) {
+      const normalizedHostPath = m.hostPath.replace(/\\/g, "/");
+      if (normalizedHostPath === normalizedParentGitDir) {
+        // Remap parent .git dir to deterministic sandbox path
+        correctedMounts.push({ ...m, sandboxPath: PARENT_GIT_SANDBOX_DIR });
+      } else if (normalizedHostPath === gitFileHostPath) {
+        // Replace .git file mount with corrected version (host repo is a worktree)
+        correctedMounts.push({
+          ...m,
+          hostPath: tempGitFile,
+          sandboxPath: `${sandboxRepoDir}/.git`,
+        });
+        replacedGitFile = true;
+      } else {
+        correctedMounts.push(m);
+      }
+    }
 
-  // Create a temp file with the corrected gitdir content
-  const correctedGitdir = `${PARENT_GIT_SANDBOX_DIR}/worktrees/${worktreeName}`;
-  const tempDir = await mkdtemp(join(tmpdir(), "sandcastle-git-"));
-  const tempGitFile = join(tempDir, "git-override");
-  await writeFile(tempGitFile, `gitdir: ${correctedGitdir}\n`);
-
-  // Build corrected mounts
-  const normalizedParentGitDir = parentGitDir.replace(/\\/g, "/");
-  const gitFileHostPath = gitEntryPath.replace(/\\/g, "/");
-
-  const correctedMounts: Array<{ hostPath: string; sandboxPath: string }> = [];
-  let replacedGitFile = false;
-
-  for (const m of gitMounts) {
-    const normalizedHostPath = m.hostPath.replace(/\\/g, "/");
-    if (normalizedHostPath === normalizedParentGitDir) {
-      // Remap parent .git dir to deterministic sandbox path
-      correctedMounts.push({ ...m, sandboxPath: PARENT_GIT_SANDBOX_DIR });
-    } else if (normalizedHostPath === gitFileHostPath) {
-      // Replace .git file mount with corrected version (host repo is a worktree)
+    // If the .git file wasn't in gitMounts (Sandcastle-created worktree),
+    // add an overlay mount for the corrected .git file
+    if (!replacedGitFile) {
       correctedMounts.push({
-        ...m,
         hostPath: tempGitFile,
         sandboxPath: `${sandboxRepoDir}/.git`,
       });
-      replacedGitFile = true;
-    } else {
-      correctedMounts.push(m);
     }
-  }
 
-  // If the .git file wasn't in gitMounts (Sandcastle-created worktree),
-  // add an overlay mount for the corrected .git file
-  if (!replacedGitFile) {
-    correctedMounts.push({
-      hostPath: tempGitFile,
-      sandboxPath: `${sandboxRepoDir}/.git`,
-    });
-  }
-
-  return correctedMounts;
-};
+    return correctedMounts;
+  });
 
 /**
  * Format a bind mount into a `-v` style string for container runtimes.

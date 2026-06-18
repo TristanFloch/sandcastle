@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Effect } from "effect";
 import {
   defaultImageName,
   expandTilde,
@@ -374,13 +375,15 @@ describe("patchGitMountsForWindows", () => {
   describe("on non-Windows platform", () => {
     it("returns mounts unchanged", async () => {
       const mounts = [{ hostPath: "/repo/.git", sandboxPath: "/repo/.git" }];
-      const result = await patchGitMountsForWindows(
-        mounts,
-        "/worktree",
-        SANDBOX_REPO_DIR,
-        undefined,
-        undefined,
-        "linux",
+      const result = await Effect.runPromise(
+        patchGitMountsForWindows(
+          mounts,
+          "/worktree",
+          SANDBOX_REPO_DIR,
+          undefined,
+          undefined,
+          "linux",
+        ),
       );
       expect(result).toEqual(mounts);
     });
@@ -394,13 +397,15 @@ describe("patchGitMountsForWindows", () => {
           sandboxPath: "C:/Users/project/.git",
         },
       ];
-      const result = await patchGitMountsForWindows(
-        mounts,
-        "/tmp/test-worktree",
-        SANDBOX_REPO_DIR,
-        undefined,
-        makeStatFile("directory"),
-        "win32",
+      const result = await Effect.runPromise(
+        patchGitMountsForWindows(
+          mounts,
+          "/tmp/test-worktree",
+          SANDBOX_REPO_DIR,
+          undefined,
+          makeStatFile("directory"),
+          "win32",
+        ),
       );
       expect(result).toEqual(mounts);
     });
@@ -415,13 +420,15 @@ describe("patchGitMountsForWindows", () => {
           sandboxPath: "C:/Users/project/.git",
         },
       ];
-      const result = await patchGitMountsForWindows(
-        mounts,
-        "/tmp/test-worktree",
-        SANDBOX_REPO_DIR,
-        makeReadFile("gitdir: C:/Users/project/.git/worktrees/my-wt\n"),
-        makeStatFile("file"),
-        "win32",
+      const result = await Effect.runPromise(
+        patchGitMountsForWindows(
+          mounts,
+          "/tmp/test-worktree",
+          SANDBOX_REPO_DIR,
+          makeReadFile("gitdir: C:/Users/project/.git/worktrees/my-wt\n"),
+          makeStatFile("file"),
+          "win32",
+        ),
       );
 
       expect(result).toHaveLength(2);
@@ -449,13 +456,17 @@ describe("patchGitMountsForWindows", () => {
           sandboxPath: "C:/Users/parent-repo/.git",
         },
       ];
-      const result = await patchGitMountsForWindows(
-        mounts,
-        "/tmp/test-worktree",
-        SANDBOX_REPO_DIR,
-        makeReadFile("gitdir: C:/Users/parent-repo/.git/worktrees/my-branch\n"),
-        makeStatFile("file"),
-        "win32",
+      const result = await Effect.runPromise(
+        patchGitMountsForWindows(
+          mounts,
+          "/tmp/test-worktree",
+          SANDBOX_REPO_DIR,
+          makeReadFile(
+            "gitdir: C:/Users/parent-repo/.git/worktrees/my-branch\n",
+          ),
+          makeStatFile("file"),
+          "win32",
+        ),
       );
 
       expect(result).toHaveLength(2);
@@ -476,15 +487,15 @@ describe("patchGitMountsForWindows", () => {
         },
       ];
 
-      let writtenContent = "";
-      const origPatch = patchGitMountsForWindows;
-      const result = await origPatch(
-        mounts,
-        "/tmp/test-worktree",
-        SANDBOX_REPO_DIR,
-        makeReadFile("gitdir: C:\\Users\\project\\.git\\worktrees\\feat-x\n"),
-        makeStatFile("file"),
-        "win32",
+      const result = await Effect.runPromise(
+        patchGitMountsForWindows(
+          mounts,
+          "/tmp/test-worktree",
+          SANDBOX_REPO_DIR,
+          makeReadFile("gitdir: C:\\Users\\project\\.git\\worktrees\\feat-x\n"),
+          makeStatFile("file"),
+          "win32",
+        ),
       );
 
       // Verify the overlay mount points to the right sandbox path
@@ -495,7 +506,7 @@ describe("patchGitMountsForWindows", () => {
 
       // Read the temp file to verify its content
       const { readFile } = await import("node:fs/promises");
-      writtenContent = await readFile(overlayMount!.hostPath, "utf-8");
+      const writtenContent = await readFile(overlayMount!.hostPath, "utf-8");
       expect(writtenContent).toBe(
         `gitdir: ${PARENT_GIT_SANDBOX_DIR}/worktrees/feat-x\n`,
       );
@@ -508,13 +519,15 @@ describe("patchGitMountsForWindows", () => {
           sandboxPath: "C:/Users/project/.git",
         },
       ];
-      const result = await patchGitMountsForWindows(
-        mounts,
-        "/tmp/test-worktree",
-        SANDBOX_REPO_DIR,
-        makeReadFile("something unexpected\n"),
-        makeStatFile("file"),
-        "win32",
+      const result = await Effect.runPromise(
+        patchGitMountsForWindows(
+          mounts,
+          "/tmp/test-worktree",
+          SANDBOX_REPO_DIR,
+          makeReadFile("something unexpected\n"),
+          makeStatFile("file"),
+          "win32",
+        ),
       );
       expect(result).toEqual(mounts);
     });
@@ -526,15 +539,17 @@ describe("patchGitMountsForWindows", () => {
           sandboxPath: "C:/Users/project/.git",
         },
       ];
-      const result = await patchGitMountsForWindows(
-        mounts,
-        "/tmp/test-worktree",
-        SANDBOX_REPO_DIR,
-        makeReadFile(
-          "gitdir: C:\\Users\\project\\.git\\worktrees\\backslash-wt\n",
+      const result = await Effect.runPromise(
+        patchGitMountsForWindows(
+          mounts,
+          "/tmp/test-worktree",
+          SANDBOX_REPO_DIR,
+          makeReadFile(
+            "gitdir: C:\\Users\\project\\.git\\worktrees\\backslash-wt\n",
+          ),
+          makeStatFile("file"),
+          "win32",
         ),
-        makeStatFile("file"),
-        "win32",
       );
 
       expect(result).toHaveLength(2);

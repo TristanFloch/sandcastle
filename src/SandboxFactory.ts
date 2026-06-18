@@ -540,18 +540,11 @@ export const WorktreeDockerSandboxFactory = {
               ),
               Effect.flatMap((gitMounts) =>
                 // Patch git mounts for Windows worktree compatibility (ADR-0006)
-                Effect.tryPromise({
-                  try: () =>
-                    patchGitMountsForWindows(
-                      gitMounts,
-                      hostRepoDir,
-                      SANDBOX_REPO_DIR,
-                    ),
-                  catch: (e) =>
-                    new WorktreeError({
-                      message: `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
-                    }),
-                }),
+                patchGitMountsForWindows(
+                  gitMounts,
+                  hostRepoDir,
+                  SANDBOX_REPO_DIR,
+                ),
               ),
               Effect.flatMap((gitMounts) =>
                 Effect.acquireUseRelease(
@@ -638,18 +631,11 @@ export const WorktreeDockerSandboxFactory = {
                 ),
                 // Patch git mounts for Windows worktree compatibility (ADR-0006)
                 Effect.flatMap((gitMounts) =>
-                  Effect.tryPromise({
-                    try: () =>
-                      patchGitMountsForWindows(
-                        gitMounts,
-                        worktreeInfo.path,
-                        SANDBOX_REPO_DIR,
-                      ),
-                    catch: (e) =>
-                      new WorktreeError({
-                        message: `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
-                      }),
-                  }),
+                  patchGitMountsForWindows(
+                    gitMounts,
+                    worktreeInfo.path,
+                    SANDBOX_REPO_DIR,
+                  ),
                 ),
                 Effect.flatMap((gitMounts) =>
                   Effect.acquireUseRelease(

@@ -12,6 +12,28 @@ const outerFunc = async () => {
 
 ---
 
+Never use `new Error()` inside an Effect closure (e.g. `Effect.fail(new Error(...))` or the `catch` of `Effect.tryPromise`). Always fail with a tagged error from `errors.ts` (or define a new `Data.TaggedError` if none fits). Raw `Error` widens the inferred error channel to a generic `Error` / `unknown` and erases the type-safe error tracking Effect gives us — downstream `Effect.catchTag` / `Effect.catchAll` lose the discriminant they need to recover narrowly. The same rule applies to functions returning Effects: their failure channel should be a tagged-error union, never a bare `Error`.
+
+```ts
+// BAD: raw Error widens the failure channel
+Effect.tryPromise({
+  try: () => doThing(),
+  catch: (e) =>
+    new Error(`Failed: ${e instanceof Error ? e.message : String(e)}`),
+});
+
+// GOOD: tagged error — failure channel stays narrow and discriminated
+Effect.tryPromise({
+  try: () => doThing(),
+  catch: (e) =>
+    new WorktreeError({
+      message: `Failed: ${e instanceof Error ? e.message : String(e)}`,
+    }),
+});
+```
+
+---
+
 Before writing a changeset, explore other potentially related changesets so you don't duplicate effort.
 
 You may write more than one changeset per commit, if the commit touches multiple user-facing behaviors.

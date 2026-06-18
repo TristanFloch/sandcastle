@@ -606,18 +606,7 @@ export const createSandboxFromWorktree = async (
         Effect.catchAll(() => Effect.succeed([])),
         // Patch git mounts for Windows worktree compatibility (ADR-0006)
         Effect.flatMap((gitMounts) =>
-          Effect.tryPromise({
-            try: () =>
-              patchGitMountsForWindows(
-                gitMounts,
-                worktreePath,
-                SANDBOX_REPO_DIR,
-              ),
-            catch: (e) =>
-              new Error(
-                `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
-              ),
-          }),
+          patchGitMountsForWindows(gitMounts, worktreePath, SANDBOX_REPO_DIR),
         ),
         Effect.flatMap((gitMounts) =>
           startSandbox({
@@ -790,18 +779,11 @@ export const createSandbox = async (
                     Effect.catchAll(() => Effect.succeed([])),
                     // Patch git mounts for Windows worktree compatibility (ADR-0006)
                     Effect.flatMap((gitMounts) =>
-                      Effect.tryPromise({
-                        try: () =>
-                          patchGitMountsForWindows(
-                            gitMounts,
-                            worktreePath,
-                            SANDBOX_REPO_DIR,
-                          ),
-                        catch: (e) =>
-                          new Error(
-                            `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
-                          ),
-                      }),
+                      patchGitMountsForWindows(
+                        gitMounts,
+                        worktreePath,
+                        SANDBOX_REPO_DIR,
+                      ),
                     ),
                     Effect.flatMap((gitMounts) =>
                       startSandbox({
