@@ -11,6 +11,7 @@ import {
   resolveGitMounts,
   SANDBOX_REPO_DIR,
 } from "./SandboxFactory.js";
+import { patchGitMountsForWindows } from "./mountUtils.js";
 import {
   withSandboxLifecycle,
   runHostHooks,
@@ -360,7 +361,19 @@ export const createWorktree = async (
         handle = startResult.handle;
       } else {
         const gitPath = join(hostRepoDir, ".git");
-        const gitMounts = yield* resolveGitMounts(gitPath);
+        const rawGitMounts = yield* resolveGitMounts(gitPath);
+        const gitMounts = yield* Effect.tryPromise({
+          try: () =>
+            patchGitMountsForWindows(
+              rawGitMounts,
+              worktreeInfo.path,
+              SANDBOX_REPO_DIR,
+            ),
+          catch: (e) =>
+            new Error(
+              `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
+            ),
+        });
         const startResult = yield* d.taskLog("Starting sandbox", () =>
           startSandbox({
             provider: resolvedSandbox,
@@ -560,7 +573,19 @@ export const createWorktree = async (
         sandboxRepoDir = startResult.worktreePath;
       } else {
         const gitPath = join(hostRepoDir, ".git");
-        const gitMounts = yield* resolveGitMounts(gitPath);
+        const rawGitMounts = yield* resolveGitMounts(gitPath);
+        const gitMounts = yield* Effect.tryPromise({
+          try: () =>
+            patchGitMountsForWindows(
+              rawGitMounts,
+              worktreeInfo.path,
+              SANDBOX_REPO_DIR,
+            ),
+          catch: (e) =>
+            new Error(
+              `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
+            ),
+        });
         const startResult = yield* startSandbox({
           provider: sandboxProvider,
           hostRepoDir,

@@ -243,6 +243,10 @@ export const patchGitMountsForWindows = async (
   } catch {
     return gitMounts;
   }
+  // .git is a directory (normal clone): no gitdir indirection to fix.
+  // `normalizeMounts` already remaps the .git mount to `${sandboxRepoDir}/.git`
+  // because the host .git sits under `worktreeHostPath`. Removing this short-
+  // circuit would break head mode against a normal clone.
   if (gitEntryType === "directory") return gitMounts;
 
   // Read and parse the gitdir: line
