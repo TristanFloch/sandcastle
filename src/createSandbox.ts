@@ -24,6 +24,7 @@ import { resolvePrompt } from "./PromptResolver.js";
 import { preprocessPrompt } from "./PromptPreprocessor.js";
 import type { LoggingOption, Timeouts } from "./run.js";
 import {
+  buildAgentStreamHandler,
   buildCompletionMessage,
   buildContextWindowLines,
   buildLogFilename,
@@ -314,9 +315,7 @@ const buildSandboxHandle = (
       });
 
       const streamEmitterLayer = agentStreamEmitterLayer(
-        resolvedLogging.type === "file"
-          ? resolvedLogging.onAgentStreamEvent
-          : undefined,
+        buildAgentStreamHandler(resolvedLogging),
       );
 
       const runLayer = Layer.mergeAll(

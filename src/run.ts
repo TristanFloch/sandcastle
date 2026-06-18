@@ -1,4 +1,5 @@
 import { NodeContext, NodeFileSystem } from "@effect/platform-node";
+import { appendFileSync, mkdirSync } from "node:fs";
 import path, { join } from "node:path";
 import { styleText } from "node:util";
 import { Effect, Layer } from "effect";
@@ -185,15 +186,97 @@ export type LoggingOption =
       readonly type: "file";
       readonly path: string;
       /**
-       * Optional callback invoked for each agent stream event (text chunk or
-       * tool call) in addition to being written to the log file. Intended for
-       * forwarding the agent's output stream to external observability
-       * systems. Errors thrown by the callback are swallowed.
+       * Optional callback invoked for each agent stream event (text chunk,
+       * tool call, or raw stdout line) in addition to being written to the
+       * log file. Intended for forwarding the agent's output stream to
+       * external observability systems. Errors thrown by the callback are
+       * swallowed.
        */
       readonly onAgentStreamEvent?: (event: AgentStreamEvent) => void;
+      /**
+       * When `true`, every raw stdout line the agent emits is appended
+       * verbatim to the same log file at `path`, in real time. Includes
+       * lines the provider's stream parser would otherwise drop (e.g.
+       * tool-use blocks for unrecognised tools). Intended for debugging
+       * stuck or unexpected agent behavior — note that the raw JSON is
+       * interleaved with the human-readable log output. Default: `false`.
+       */
+      readonly verbose?: boolean;
     }
   /** Render progress and agent output as an interactive UI in the terminal (terminal mode). */
-  | { readonly type: "stdout" };
+  | {
+      readonly type: "stdout";
+      /**
+       * When `true`, every raw stdout line the agent emits is written
+       * verbatim to `process.stdout`, in real time. Includes lines the
+       * provider's stream parser would otherwise drop. Intended for
+       * debugging stuck or unexpected agent behavior. Note: the raw output
+       * is interleaved with the interactive terminal UI. Default: `false`.
+       */
+      readonly verbose?: boolean;
+    };
+
+/**
+ * Build the agent-stream event handler for a resolved logging option.
+ *
+ * Composes the user-provided `onAgentStreamEvent` callback (file mode only)
+ * with the verbose raw-line sink: the log file at `path` for file mode, or
+ * `process.stdout` for stdout mode. Returns `undefined` when neither
+ * verbose mode nor a user callback is set.
+ *
+ * Raw lines are written synchronously to honor the `onLine` real-time
+ * contract — the debugger needs each line as soon as the agent emits it.
+ *
+ * @internal
+ */
+export const buildAgentStreamHandler = (
+  logging: LoggingOption,
+): ((event: AgentStreamEvent) => void) | undefined => {
+  const userHandler =
+    logging.type === "file" ? logging.onAgentStreamEvent : undefined;
+  const verboseSink = logging.verbose
+    ? buildVerboseRawLineSink(logging)
+    : undefined;
+  if (!userHandler && !verboseSink) return undefined;
+  return (event) => {
+    if (userHandler) {
+      try {
+        userHandler(event);
+      } catch {
+        // Swallow — a broken forwarder must not stop the verbose sink.
+      }
+    }
+    if (verboseSink && event.type === "raw") {
+      verboseSink(event.line);
+    }
+  };
+};
+
+const buildVerboseRawLineSink = (
+  logging: LoggingOption,
+): ((line: string) => void) => {
+  if (logging.type === "file") {
+    const logPath = logging.path;
+    // Ensure the directory exists; the FileDisplay layer creates it for the
+    // primary log file but it hasn't necessarily run by the time the first
+    // raw line is flushed.
+    try {
+      mkdirSync(path.dirname(logPath), { recursive: true });
+    } catch {
+      // Swallow — appendFileSync below will surface any real I/O error.
+    }
+    return (line) => {
+      try {
+        appendFileSync(logPath, line + "\n");
+      } catch {
+        // Swallow — verbose-mode I/O errors must not kill the run.
+      }
+    };
+  }
+  return (line) => {
+    process.stdout.write(line + "\n");
+  };
+};
 
 /** Override default timeouts for built-in lifecycle steps. Unset keys keep their defaults. */
 export interface Timeouts {
@@ -548,9 +631,7 @@ export async function run(
   );
 
   const streamEmitterLayer = agentStreamEmitterLayer(
-    resolvedLogging.type === "file"
-      ? resolvedLogging.onAgentStreamEvent
-      : undefined,
+    buildAgentStreamHandler(resolvedLogging),
   );
 
   const runLayer = Layer.mergeAll(
