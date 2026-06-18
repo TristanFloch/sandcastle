@@ -46,7 +46,46 @@ import type {
   OutputObjectDefinition,
   OutputStringDefinition,
 } from "./Output.js";
+import { StructuredOutputError } from "./Output.js";
 import { extractStructuredOutput } from "./extractStructuredOutput.js";
+
+/**
+ * Build the token-efficient feedback prompt sent to the agent when retrying
+ * structured output. The agent has already done the work in the resumed
+ * session — the only ask is to re-emit a corrected tag.
+ *
+ * @internal
+ */
+export const buildStructuredOutputRetryFeedback = (
+  error: StructuredOutputError,
+  retriesRemaining: number,
+): string => {
+  const raw =
+    error.rawMatched === undefined
+      ? "(no matching tag was emitted)"
+      : error.rawMatched;
+  const cause =
+    error.cause === undefined
+      ? "(no parser detail)"
+      : typeof error.cause === "string"
+        ? error.cause
+        : JSON.stringify(error.cause, null, 2);
+
+  return `Your previous response did not produce valid structured output.
+
+Retries remaining after this attempt: ${retriesRemaining}.
+
+Problem:
+${error.message}
+
+Parser detail:
+${cause}
+
+Previous matched output:
+${raw}
+
+Emit only a corrected <${error.tag}> block. Do not change files or run commands.`;
+};
 
 /** Default maximum number of iterations for a run. */
 export const DEFAULT_MAX_ITERATIONS = 1;
@@ -517,6 +556,25 @@ export async function run(
     );
   }
 
+  // Validate: output.maxRetries requires a provider that supports session
+  // resumption. Fail at the earliest possible point — the issue is fully
+  // determined by the inputs to run() and does not depend on the agent's
+  // output. See issue #825.
+  const outputMaxRetries = options.output?.maxRetries ?? 0;
+  if (outputMaxRetries < 0 || !Number.isInteger(outputMaxRetries)) {
+    throw new Error(
+      "output.maxRetries must be a non-negative integer. " +
+        `Received: ${outputMaxRetries}`,
+    );
+  }
+  if (outputMaxRetries > 0 && !provider.sessionStorage) {
+    throw new Error(
+      `output.maxRetries requires an agent provider that supports session resumption. ` +
+        `The "${provider.name}" provider does not. ` +
+        `Use claudeCode, codex, or pi, or set maxRetries to 0.`,
+    );
+  }
+
   // Extract explicit branch when in branch mode
   const branch: string | undefined =
     branchStrategy.type === "branch" ? branchStrategy.branch : undefined;
@@ -787,18 +845,49 @@ export async function run(
     // one that produced this stdout. Carry its session id onto the error so a
     // caller can resume the same session to re-emit corrected output.
     const lastIteration = baseResult.iterations.at(-1);
-    const output = await extractStructuredOutput(
-      baseResult.stdout,
-      options.output,
-      {
-        commits: baseResult.commits,
-        branch: baseResult.branch,
-        preservedWorktreePath: baseResult.preservedWorktreePath,
-        sessionId: lastIteration?.sessionId,
-        sessionFilePath: lastIteration?.sessionFilePath,
-      },
-    );
-    return { ...baseResult, output };
+    try {
+      const output = await extractStructuredOutput(
+        baseResult.stdout,
+        options.output,
+        {
+          commits: baseResult.commits,
+          branch: baseResult.branch,
+          preservedWorktreePath: baseResult.preservedWorktreePath,
+          sessionId: lastIteration?.sessionId,
+          sessionFilePath: lastIteration?.sessionFilePath,
+        },
+      );
+      return { ...baseResult, output };
+    } catch (error) {
+      // Built-in retry: when maxRetries > 0 and the agent emitted a session id
+      // we can resume, recurse with a token-efficient feedback prompt. Each
+      // retry decrements maxRetries so the recursion terminates. See issue
+      // #825.
+      if (
+        error instanceof StructuredOutputError &&
+        outputMaxRetries > 0 &&
+        error.sessionId !== undefined
+      ) {
+        const retriesRemainingAfter = outputMaxRetries - 1;
+        const retryOutput = {
+          ...options.output,
+          maxRetries: retriesRemainingAfter,
+        };
+        return run({
+          ...options,
+          prompt: buildStructuredOutputRetryFeedback(
+            error,
+            retriesRemainingAfter,
+          ),
+          promptFile: undefined,
+          promptArgs: undefined,
+          resumeSession: error.sessionId,
+          forkSession: false,
+          output: retryOutput,
+        } as RunOptions);
+      }
+      throw error;
+    }
   }
 
   return baseResult;
