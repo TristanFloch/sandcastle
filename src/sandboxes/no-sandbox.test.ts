@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { noSandbox } from "./no-sandbox.js";
 
+const itPosix = process.platform === "win32" ? it.skip : it;
+const itWindows = process.platform === "win32" ? it : it.skip;
+
 describe("noSandbox", () => {
   it("returns a provider with tag 'none'", () => {
     const provider = noSandbox();
@@ -38,7 +41,7 @@ describe("noSandbox", () => {
       expect(result.exitCode).toBe(42);
     });
 
-    it("exec supports onLine streaming callback", async () => {
+    itPosix("exec supports onLine streaming callback", async () => {
       const provider = noSandbox();
       const handle = await provider.create({
         worktreePath: process.cwd(),
@@ -55,7 +58,7 @@ describe("noSandbox", () => {
       expect(result.exitCode).toBe(0);
     });
 
-    it("exec respects cwd option", async () => {
+    itPosix("exec respects cwd option", async () => {
       const provider = noSandbox();
       const handle = await provider.create({
         worktreePath: "/tmp",
@@ -79,7 +82,7 @@ describe("noSandbox", () => {
       expect(result.exitCode).toBe(0);
     });
 
-    it("exec passes env vars to spawned processes", async () => {
+    itPosix("exec passes env vars to spawned processes", async () => {
       const provider = noSandbox();
       const handle = await provider.create({
         worktreePath: process.cwd(),
@@ -90,48 +93,94 @@ describe("noSandbox", () => {
       expect(result.stdout.trim()).toBe("sandcastle_test_value");
     });
 
-    it("interactiveExec spawns process and returns exit code", async () => {
-      const provider = noSandbox();
-      const handle = await provider.create({
-        worktreePath: process.cwd(),
-        env: {},
-      });
+    itWindows(
+      "exec passes env vars to spawned processes (cmd.exe)",
+      async () => {
+        // Doubles as the regression test for issue #800: `%VAR%` only expands
+        // when the command runs through cmd.exe — if `exec` were still spawning
+        // `sh -c`, this would either fail with `spawn sh ENOENT` (no `sh` on a
+        // stock Windows PATH) or echo back the literal `%MY_TEST_VAR%`.
+        const provider = noSandbox();
+        const handle = await provider.create({
+          worktreePath: process.cwd(),
+          env: { MY_TEST_VAR: "sandcastle_test_value" },
+        });
 
-      const result = await handle.interactiveExec(["sh", "-c", "exit 0"], {
-        stdin: process.stdin,
-        stdout: process.stdout,
-        stderr: process.stderr,
-      });
+        const result = await handle.exec("echo %MY_TEST_VAR%");
+        expect(result.stdout.trim()).toBe("sandcastle_test_value");
+      },
+    );
 
-      expect(result.exitCode).toBe(0);
-    });
+    itPosix(
+      "interactiveExec spawns process and returns exit code",
+      async () => {
+        const provider = noSandbox();
+        const handle = await provider.create({
+          worktreePath: process.cwd(),
+          env: {},
+        });
 
-    it("bounds streamed stdout to the configured tail without dropping live lines", async () => {
-      const provider = noSandbox({ maxOutputTailChars: 100 });
-      const handle = await provider.create({
-        worktreePath: process.cwd(),
-        env: {},
-      });
+        const result = await handle.interactiveExec(["sh", "-c", "exit 0"], {
+          stdin: process.stdin,
+          stdout: process.stdout,
+          stderr: process.stderr,
+        });
 
-      const lines: string[] = [];
-      const result = await handle.exec(
-        'for i in $(seq 1 5000); do echo "line-$i"; done',
-        { onLine: (line) => lines.push(line) },
-      );
+        expect(result.exitCode).toBe(0);
+      },
+    );
 
-      // The process survives and exits cleanly — no RangeError crash.
-      expect(result.exitCode).toBe(0);
-      // Every line is delivered live to onLine, regardless of the tail bound.
-      expect(lines.length).toBe(5000);
-      expect(lines[0]).toBe("line-1");
-      expect(lines[lines.length - 1]).toBe("line-5000");
-      // The returned stdout is bounded to the configured tail.
-      expect(result.stdout.length).toBeLessThanOrEqual(100);
-      // ...and it is the tail, so the most recent line is present.
-      expect(result.stdout).toContain("line-5000");
-    });
+    itWindows(
+      "interactiveExec spawns process and returns exit code",
+      async () => {
+        const provider = noSandbox();
+        const handle = await provider.create({
+          worktreePath: process.cwd(),
+          env: {},
+        });
 
-    it("bounds streamed stderr to the configured tail", async () => {
+        const result = await handle.interactiveExec(
+          ["cmd.exe", "/d", "/s", "/c", "exit 0"],
+          {
+            stdin: process.stdin,
+            stdout: process.stdout,
+            stderr: process.stderr,
+          },
+        );
+
+        expect(result.exitCode).toBe(0);
+      },
+    );
+
+    itPosix(
+      "bounds streamed stdout to the configured tail without dropping live lines",
+      async () => {
+        const provider = noSandbox({ maxOutputTailChars: 100 });
+        const handle = await provider.create({
+          worktreePath: process.cwd(),
+          env: {},
+        });
+
+        const lines: string[] = [];
+        const result = await handle.exec(
+          'for i in $(seq 1 5000); do echo "line-$i"; done',
+          { onLine: (line) => lines.push(line) },
+        );
+
+        // The process survives and exits cleanly — no RangeError crash.
+        expect(result.exitCode).toBe(0);
+        // Every line is delivered live to onLine, regardless of the tail bound.
+        expect(lines.length).toBe(5000);
+        expect(lines[0]).toBe("line-1");
+        expect(lines[lines.length - 1]).toBe("line-5000");
+        // The returned stdout is bounded to the configured tail.
+        expect(result.stdout.length).toBeLessThanOrEqual(100);
+        // ...and it is the tail, so the most recent line is present.
+        expect(result.stdout).toContain("line-5000");
+      },
+    );
+
+    itPosix("bounds streamed stderr to the configured tail", async () => {
       const provider = noSandbox({ maxOutputTailChars: 100 });
       const handle = await provider.create({
         worktreePath: process.cwd(),

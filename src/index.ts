@@ -15,6 +15,7 @@ export type {
   Sandbox,
   SandboxRunOptions,
   SandboxRunResult,
+  ResumeSandboxRunResultOptions,
   SandboxInteractiveOptions,
   SandboxInteractiveResult,
   CloseResult,

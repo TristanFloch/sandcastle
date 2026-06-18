@@ -354,7 +354,9 @@ export const create = (
           new WorktreeError({
             message:
               `Branch '${branch}' is already checked out in worktree at '${collision.path}'. ` +
-              `Use a different branch name, or wait for the other run to finish.`,
+              `Sandcastle's branch and merge-to-head strategies run the agent in a git worktree under .sandcastle/worktrees/, ` +
+              `and git refuses to check out the same branch in two worktrees at once (HEAD would become ambiguous). ` +
+              `Pick a different branch, or switch the main working tree to a different branch before re-running.`,
           }),
         );
       }

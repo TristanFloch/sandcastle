@@ -278,6 +278,10 @@ export interface SandboxLifecycleOptions {
   readonly signal?: AbortSignal;
   /** Override default timeouts for built-in lifecycle steps. Unset keys keep their defaults. */
   readonly timeouts?: Timeouts;
+  /** When true (used by `createWorktree`'s merge-to-head path), skip the post-merge
+   *  detach-and-delete of the source branch so the worktree handle stays usable for
+   *  subsequent `wt.run()` / `wt.interactive()` calls. */
+  readonly keepSourceBranch?: boolean;
 }
 
 export interface SandboxContext {
@@ -548,8 +552,14 @@ export const withSandboxLifecycle = <A>(
         }
       });
 
-      // Detach the worktree from the temp branch so the branch can be deleted
-      yield* execOk(sandbox, "git checkout --detach", { cwd: sandboxRepoDir });
+      // Detach the worktree from the temp branch so the branch can be deleted.
+      // Skipped when `keepSourceBranch` is set (createWorktree's merge-to-head
+      // path) so the worktree stays on its source branch for re-use.
+      if (!options.keepSourceBranch) {
+        yield* execOk(sandbox, "git checkout --detach", {
+          cwd: sandboxRepoDir,
+        });
+      }
 
       if (hasNewCommits) {
         // Fast-forward host's current branch to the temp branch
@@ -588,12 +598,16 @@ export const withSandboxLifecycle = <A>(
         );
       }
 
-      // Delete the temp branch (now merged into host branch)
-      yield* Effect.promise(() =>
-        execAsync(`git branch -D "${resolvedBranch}"`, {
-          cwd: hostRepoDir,
-        }).catch(() => {}),
-      );
+      // Delete the temp branch (now merged into host branch). Skipped when
+      // `keepSourceBranch` is set: the source branch is the worktree's active
+      // branch and the worktree's lifetime outlives the lifecycle.
+      if (!options.keepSourceBranch) {
+        yield* Effect.promise(() =>
+          execAsync(`git branch -D "${resolvedBranch}"`, {
+            cwd: hostRepoDir,
+          }).catch(() => {}),
+        );
+      }
 
       // Collect the commits now on the host branch
       commits = yield* display.taskLog("Collecting commits", () =>

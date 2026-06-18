@@ -650,6 +650,12 @@ describe("WorktreeManager.create", () => {
     // "main" is the currently checked-out branch in the main working tree
     const err = await runFail(create(repoDir, { branch: "main" }));
     expect(err.message).toMatch(/already checked out/i);
+    // The error should explain why this happens (sandcastle uses worktrees,
+    // git forbids the same branch in two worktrees) and what to do about it,
+    // not propose smart recovery.
+    expect(err.message).toMatch(/worktree/i);
+    expect(err.message).toMatch(/branch.*merge-to-head/i);
+    expect(err.message).toMatch(/different branch/i);
   });
 
   it("does not write upstream tracking config even when autoSetupMerge is enabled", async () => {

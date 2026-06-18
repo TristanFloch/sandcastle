@@ -4,7 +4,6 @@ import {
   type RunOptions,
   type RunResult,
 } from "@ai-hero/sandcastle";
-import { runWithRetry } from "./run-with-retry";
 
 export interface RunWithExtractionOptions<T> extends Omit<
   RunOptions,
@@ -12,13 +11,24 @@ export interface RunWithExtractionOptions<T> extends Omit<
 > {
   readonly output: OutputObjectDefinition<T>;
   readonly extractionPrompt: string;
-  readonly maxAttempts?: number;
+  /**
+   * Extra attempts after the first if extraction or validation fails. Forwarded
+   * to `Output`'s built-in `maxRetries`, which resumes the extraction session
+   * and feeds back the error so the agent can re-emit a corrected tag.
+   * Default: `2` (three attempts total).
+   */
+  readonly maxRetries?: number;
 }
 
 export async function runWithExtraction<T>(
   options: RunWithExtractionOptions<T>,
 ): Promise<RunResult & { output: T }> {
-  const { output, extractionPrompt, maxAttempts, ...produceOptions } = options;
+  const {
+    output,
+    extractionPrompt,
+    maxRetries = 2,
+    ...produceOptions
+  } = options;
   const produce = await run(produceOptions);
   const sessionId = produce.iterations.at(-1)?.sessionId;
 
@@ -29,14 +39,13 @@ export async function runWithExtraction<T>(
   }
 
   const { promptArgs: _promptArgs, ...extractionOptions } = produceOptions;
-  const extraction = await runWithRetry({
+  const extraction = await run({
     ...extractionOptions,
     name: produceOptions.name ? `${produceOptions.name} (extract)` : undefined,
     promptFile: undefined,
     prompt: extractionPrompt,
     resumeSession: sessionId,
-    output,
-    maxAttempts,
+    output: { ...output, maxRetries },
   });
 
   return { ...produce, output: extraction.output };

@@ -9,12 +9,36 @@ export interface OutputObjectDefinition<T> {
   readonly _tag: "object";
   readonly tag: string;
   readonly schema: StandardSchemaV1<unknown, T>;
+  /**
+   * Maximum number of additional attempts after the first if structured output
+   * extraction or validation fails. Each retry resumes the failed run's agent
+   * session and feeds back a token-efficient description of the error so the
+   * agent can re-emit a corrected tag. Default: `0` (no retries).
+   *
+   * Retries require the agent provider to support session resumption (i.e.
+   * `provider.sessionStorage` is populated — Claude Code, Codex, Pi). `run()`
+   * fails at entry with a clear error when retries are requested but the
+   * provider cannot resume.
+   */
+  readonly maxRetries?: number;
 }
 
 /** Branded output definition for `Output.string({ tag })`. */
 export interface OutputStringDefinition {
   readonly _tag: "string";
   readonly tag: string;
+  /**
+   * Maximum number of additional attempts after the first if structured output
+   * extraction fails. Each retry resumes the failed run's agent session and
+   * feeds back a token-efficient description of the error so the agent can
+   * re-emit a corrected tag. Default: `0` (no retries).
+   *
+   * Retries require the agent provider to support session resumption (i.e.
+   * `provider.sessionStorage` is populated — Claude Code, Codex, Pi). `run()`
+   * fails at entry with a clear error when retries are requested but the
+   * provider cannot resume.
+   */
+  readonly maxRetries?: number;
 }
 
 /** Union of all output definition shapes accepted by `run()`. */
@@ -45,10 +69,15 @@ export const Output = {
    * Declare an object-typed structured output extracted from an XML tag in
    * the agent's stdout. The tag contents are JSON-parsed (with fence-aware
    * unwrapping) and validated against the provided Standard Schema validator.
+   *
+   * Set `maxRetries` to have `run()` automatically resume the failed session
+   * and ask the agent to re-emit corrected output when extraction or
+   * validation fails. Default: `0` (no retries).
    */
   object: <Schema extends StandardSchemaV1>(opts: {
     tag: string;
     schema: Schema;
+    maxRetries?: number;
   }): OutputObjectDefinition<StandardSchemaV1.InferOutput<Schema>> => ({
     _tag: "object",
     tag: opts.tag,
@@ -56,16 +85,25 @@ export const Output = {
       unknown,
       StandardSchemaV1.InferOutput<Schema>
     >,
+    maxRetries: opts.maxRetries,
   }),
 
   /**
    * Declare a string-typed structured output extracted from an XML tag in
    * the agent's stdout. The tag contents are whitespace-trimmed and returned
    * as a plain string — no JSON parsing, no schema validation.
+   *
+   * Set `maxRetries` to have `run()` automatically resume the failed session
+   * and ask the agent to re-emit corrected output when extraction fails.
+   * Default: `0` (no retries).
    */
-  string: (opts: { tag: string }): OutputStringDefinition => ({
+  string: (opts: {
+    tag: string;
+    maxRetries?: number;
+  }): OutputStringDefinition => ({
     _tag: "string",
     tag: opts.tag,
+    maxRetries: opts.maxRetries,
   }),
 } as const;
 

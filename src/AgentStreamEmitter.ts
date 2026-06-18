@@ -6,6 +6,12 @@ import { Context, Effect, Layer } from "effect";
  *
  * Emitted only in log-to-file mode when an `onAgentStreamEvent` callback is
  * provided via `logging`. See `run()`.
+ *
+ * The `"raw"` variant carries every stdout line the agent emits, verbatim and
+ * before parsing — including lines that the provider's stream parser would
+ * otherwise drop (e.g. tool-use blocks for unrecognised tools). Intended for
+ * debugging when the typed `"text"` / `"toolCall"` events don't surface
+ * enough detail.
  */
 export type AgentStreamEvent =
   | {
@@ -18,6 +24,12 @@ export type AgentStreamEvent =
       readonly type: "toolCall";
       readonly name: string;
       readonly formattedArgs: string;
+      readonly iteration: number;
+      readonly timestamp: Date;
+    }
+  | {
+      readonly type: "raw";
+      readonly line: string;
       readonly iteration: number;
       readonly timestamp: Date;
     };

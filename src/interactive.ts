@@ -11,6 +11,7 @@ import {
   resolveGitMounts,
   SANDBOX_REPO_DIR,
 } from "./SandboxFactory.js";
+import { patchGitMountsForWindows } from "./mountUtils.js";
 import {
   withSandboxLifecycle,
   runHostHooks,
@@ -341,13 +342,21 @@ export const interactive = async (
         return startResult.handle;
       } else {
         const gitPath = join(hostRepoDir, ".git");
-        const gitMounts = yield* resolveGitMounts(gitPath);
+        const rawGitMounts = yield* resolveGitMounts(gitPath);
+        const worktreeOrRepoPath = isHeadMode
+          ? hostRepoDir
+          : worktreeInfo!.path;
+        const gitMounts = yield* patchGitMountsForWindows(
+          rawGitMounts,
+          worktreeOrRepoPath,
+          SANDBOX_REPO_DIR,
+        );
         const startResult = yield* d.taskLog("Starting sandbox", () =>
           startSandbox({
             provider: sandboxProvider,
             hostRepoDir,
             env: effectiveEnv,
-            worktreeOrRepoPath: isHeadMode ? hostRepoDir : worktreeInfo!.path,
+            worktreeOrRepoPath,
             gitMounts,
             repoDir: SANDBOX_REPO_DIR,
           }),

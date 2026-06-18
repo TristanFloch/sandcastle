@@ -1274,6 +1274,98 @@ describe("Orchestrator agent stream emitter", () => {
 
     expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
   });
+
+  it("emits raw events for every line including lines parseStreamLine drops", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-stream-raw-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
+    const displayLayer = SilentDisplay.layer(ref);
+
+    const events: AgentStreamEvent[] = [];
+    const emitterLayer = agentStreamEmitterLayer((e) => {
+      events.push(e);
+    });
+
+    // Lines: one valid stream-JSON line that yields a typed event, one valid
+    // stream-JSON line that parseStreamLine deliberately drops (unrecognised
+    // tool — not in TOOL_ARG_FIELDS), and one plain non-JSON line. All three
+    // must surface as raw events.
+    const droppedToolLine = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "TotallyUnknownTool",
+            input: { foo: "bar" },
+          },
+        ],
+      },
+    });
+    const plainLine = "raw TUI output: rendering panel...";
+    const recognisedLine = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Hello there" }] },
+    });
+    const resultLine = JSON.stringify({
+      type: "result",
+      result: "<promise>COMPLETE</promise>",
+    });
+
+    const mockLayer = makeTestSandboxFactory(hostDir, (dir) => {
+      const real = makeLocalSandbox(dir);
+      return {
+        exec: (command, options) => {
+          if (command.startsWith("claude ") && options?.onLine) {
+            const onLine = options.onLine;
+            const lines = [
+              droppedToolLine,
+              plainLine,
+              recognisedLine,
+              resultLine,
+            ];
+            for (const line of lines) onLine(line);
+            return Effect.succeed({
+              stdout: lines.join("\n"),
+              stderr: "",
+              exitCode: 0,
+            });
+          }
+          return real.exec(command, options);
+        },
+        copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
+        copyFileOut: (sandboxPath, hostPath) =>
+          real.copyFileOut(sandboxPath, hostPath),
+      };
+    });
+
+    await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do work",
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(mockLayer.factoryLayer, displayLayer, emitterLayer),
+        ),
+      ),
+    );
+
+    const rawEvents = events.filter((e) => e.type === "raw");
+    const rawLines = rawEvents.map((e) => e.line);
+
+    expect(rawLines).toEqual([
+      droppedToolLine,
+      plainLine,
+      recognisedLine,
+      resultLine,
+    ]);
+    expect(rawEvents[0]!.iteration).toBe(1);
+    expect(rawEvents[0]!.timestamp).toBeInstanceOf(Date);
+  });
 });
 
 describe("Orchestrator error handling", () => {

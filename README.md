@@ -218,14 +218,20 @@ const result = await run({
     type: "file",
     path: ".sandcastle/logs/my-run.log",
     // Optional: forward the agent's output stream to your own observability system.
-    // Fires for each text chunk and tool call the agent produces. Errors thrown
-    // by the callback are swallowed so a broken forwarder cannot kill the run.
+    // Fires for each text chunk, tool call, and raw stdout line the agent
+    // produces. Errors thrown by the callback are swallowed so a broken
+    // forwarder cannot kill the run.
     onAgentStreamEvent: (event) => {
-      // event is { type: "text" | "toolCall", iteration, timestamp, ... }
+      // event is { type: "text" | "toolCall" | "raw", iteration, timestamp, ... }
       myLogger.info(event);
     },
+    // Optional: append every raw stdout line the agent emits to the same
+    // log file, interleaved with the human-readable output. Includes lines
+    // the provider's stream parser would otherwise drop. Intended for
+    // debugging stuck or unexpected agent behaviour.
+    verbose: true,
   },
-  // logging: { type: "stdout" }, // OR render an interactive UI in the terminal
+  // logging: { type: "stdout", verbose: true }, // OR terminal mode (verbose: raw lines to stdout)
 
   // String (or array of strings) the agent emits to end the iteration loop early.
   // Default: "<promise>COMPLETE</promise>"
@@ -347,29 +353,32 @@ if (closeResult.preservedWorktreePath) {
 
 #### `SandboxRunOptions`
 
-| Option                     | Type               | Default                       | Description                                                                          |
-| -------------------------- | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------ |
-| `agent`                    | AgentProvider      | —                             | **Required.** Agent provider (e.g. `claudeCode("claude-opus-4-7")`)                  |
-| `prompt`                   | string             | —                             | Inline prompt (mutually exclusive with `promptFile`)                                 |
-| `promptFile`               | string             | —                             | Path to prompt file (mutually exclusive with `prompt`)                               |
-| `promptArgs`               | PromptArgs         | —                             | Key-value map for `{{KEY}}` placeholder substitution                                 |
-| `maxIterations`            | number             | `1`                           | Maximum iterations to run                                                            |
-| `completionSignal`         | string \| string[] | `<promise>COMPLETE</promise>` | String(s) the agent emits to stop the iteration loop early                           |
-| `idleTimeoutSeconds`       | number             | `600`                         | Idle timeout in seconds — resets on each agent output event                          |
-| `completionTimeoutSeconds` | number             | `60`                          | Grace window after the completion signal is seen but the agent process hasn't exited |
-| `name`                     | string             | —                             | Display name for the run                                                             |
-| `logging`                  | object             | file (auto-generated)         | `{ type: 'file', path }` or `{ type: 'stdout' }`                                     |
-| `signal`                   | AbortSignal        | —                             | Cancels the run when aborted; handle stays usable afterward                          |
+| Option                     | Type               | Default                       | Description                                                                                                                          |
+| -------------------------- | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `agent`                    | AgentProvider      | —                             | **Required.** Agent provider (e.g. `claudeCode("claude-opus-4-7")`)                                                                  |
+| `prompt`                   | string             | —                             | Inline prompt (mutually exclusive with `promptFile`)                                                                                 |
+| `promptFile`               | string             | —                             | Path to prompt file (mutually exclusive with `prompt`)                                                                               |
+| `promptArgs`               | PromptArgs         | —                             | Key-value map for `{{KEY}}` placeholder substitution                                                                                 |
+| `maxIterations`            | number             | `1`                           | Maximum iterations to run                                                                                                            |
+| `completionSignal`         | string \| string[] | `<promise>COMPLETE</promise>` | String(s) the agent emits to stop the iteration loop early                                                                           |
+| `idleTimeoutSeconds`       | number             | `600`                         | Idle timeout in seconds — resets on each agent output event                                                                          |
+| `completionTimeoutSeconds` | number             | `60`                          | Grace window after the completion signal is seen but the agent process hasn't exited                                                 |
+| `name`                     | string             | —                             | Display name for the run                                                                                                             |
+| `logging`                  | object             | file (auto-generated)         | `{ type: 'file', path }` or `{ type: 'stdout' }`                                                                                     |
+| `resumeSession`            | string             | —                             | Resume a prior session by ID for agents that support resume. Incompatible with `maxIterations > 1`. Session file must exist on host. |
+| `signal`                   | AbortSignal        | —                             | Cancels the run when aborted; handle stays usable afterward                                                                          |
 
 #### `SandboxRunResult`
 
-| Field              | Type                | Description                                                        |
-| ------------------ | ------------------- | ------------------------------------------------------------------ |
-| `iterations`       | `IterationResult[]` | Per-iteration results (use `.length` for the count)                |
-| `completionSignal` | string?             | The matched completion signal string, or `undefined` if none fired |
-| `stdout`           | string              | Combined agent output from all iterations                          |
-| `commits`          | `{ sha }[]`         | Commits created during the run                                     |
-| `logFilePath`      | string?             | Path to the log file (only when logging to a file)                 |
+| Field                      | Type                                                                                     | Description                                                                                                                         |
+| -------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `iterations`               | `IterationResult[]`                                                                      | Per-iteration results (use `.length` for the count)                                                                                 |
+| `completionSignal`         | string?                                                                                  | The matched completion signal string, or `undefined` if none fired                                                                  |
+| `stdout`                   | string                                                                                   | Combined agent output from all iterations                                                                                           |
+| `commits`                  | `{ sha }[]`                                                                              | Commits created during the run                                                                                                      |
+| `logFilePath`              | string?                                                                                  | Path to the log file (only when logging to a file)                                                                                  |
+| `resume(prompt, options?)` | `(prompt: string, options?: ResumeSandboxRunResultOptions) => Promise<SandboxRunResult>` | Continue the captured session for one iteration inside the same warm sandbox. Present only when the provider captured a session id. |
+| `fork(prompt, options?)`   | `(prompt: string, options?: ResumeSandboxRunResultOptions) => Promise<SandboxRunResult>` | Fork the captured session for one iteration inside the same warm sandbox. The parent session is left intact (ADR 0018).             |
 
 #### `CloseResult`
 
@@ -427,6 +436,8 @@ await sandbox.close();
 ```
 
 `wt.close()` checks for uncommitted changes: if the worktree is dirty, it's preserved on disk; if clean, it's removed. `await using` calls `close()` automatically. The worktree persists after `run()`, `interactive()`, and `createSandbox()` complete, so you can hand it to another agent or inspect it.
+
+With `branchStrategy: { type: "merge-to-head" }`, each `wt.run()` / `wt.interactive()` merges the agent's commits back to the host's current branch before returning, and the worktree's source branch is preserved across calls so subsequent ones can reuse the same handle. (This differs from top-level `run()`, where the temp branch is deleted after the merge.)
 
 **Split ownership**: When a sandbox is created via `wt.createSandbox()`, `sandbox.close()` tears down the container only — the worktree remains. `wt.close()` is responsible for worktree cleanup. This differs from the top-level `createSandbox()`, where `sandbox.close()` owns both container and worktree.
 
@@ -695,7 +706,24 @@ console.log(result.output.score); // typed as number
 
 `Output.string({ tag })` extracts the tag contents as a plain string (trimmed, no JSON parsing). Both helpers require `maxIterations` to be `1` (the default). The resolved prompt must contain the configured opening tag literal.
 
-When extraction or validation fails, `run()` throws a `StructuredOutputError`. Alongside `tag`, `rawMatched`, `cause`, `commits`, `branch`, and `preservedWorktreePath`, the error carries the `sessionId` (and `sessionFilePath`, when the session was captured) of the run that produced the bad output. You can resume that session to ask the agent to re-emit corrected output, without repeating the work:
+When extraction or validation fails, `run()` throws a `StructuredOutputError`. Alongside `tag`, `rawMatched`, `cause`, `commits`, `branch`, and `preservedWorktreePath`, the error carries the `sessionId` (and `sessionFilePath`, when the session was captured) of the run that produced the bad output.
+
+Pass `maxRetries` to have Sandcastle handle the retry loop for you. Each retry resumes the same agent session and feeds back a token-efficient description of the error, so the agent can re-emit a corrected tag without redoing the work. Retries require an agent provider that supports session resumption (`claudeCode`, `codex`, `pi`) — calling `run()` with `maxRetries > 0` against a non-resumable provider (`cursor`, `opencode`, `copilot`) throws immediately.
+
+```ts
+const result = await run({
+  agent: claudeCode("claude-opus-4-7"),
+  sandbox: docker(),
+  prompt: "Analyze the code and emit JSON inside <result> tags.",
+  output: Output.object({
+    tag: "result",
+    schema: z.object({ summary: z.string(), score: z.number() }),
+    maxRetries: 2, // 2 retries on top of the initial attempt
+  }),
+});
+```
+
+If you need to drive the retry loop manually — for example, to customise the feedback prompt or rotate models on each attempt — leave `maxRetries` at its default of `0` and resume the failed session yourself:
 
 ```ts
 import { run, Output, StructuredOutputError } from "@ai-hero/sandcastle";

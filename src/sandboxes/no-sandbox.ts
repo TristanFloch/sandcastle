@@ -65,9 +65,18 @@ export const noSandbox = (options?: NoSandboxOptions): NoSandboxProvider => ({
       ): Promise<ExecResult> => {
         // sudo is a no-op for no-sandbox — the user is already on the host
         const cwd = opts?.cwd ?? worktreePath;
+        const isWindows = process.platform === "win32";
+        // PowerShell and cmd.exe don't ship `sh`, so on Windows route the
+        // command string through cmd.exe instead. `/d` skips AutoRun, `/s`
+        // preserves the quoted command verbatim, `/c` runs it and exits.
+        // `windowsVerbatimArguments` keeps Node from re-quoting our args.
+        const shellCmd = isWindows ? "cmd.exe" : "sh";
+        const shellArgs = isWindows
+          ? ["/d", "/s", "/c", command]
+          : ["-c", command];
 
         return new Promise((resolve, reject) => {
-          const proc = spawn("sh", ["-c", command], {
+          const proc = spawn(shellCmd, shellArgs, {
             cwd,
             env: processEnv,
             stdio: [
@@ -75,6 +84,7 @@ export const noSandbox = (options?: NoSandboxOptions): NoSandboxProvider => ({
               "pipe",
               "pipe",
             ],
+            windowsVerbatimArguments: isWindows,
           });
 
           if (opts?.stdin !== undefined) {
@@ -131,10 +141,14 @@ export const noSandbox = (options?: NoSandboxOptions): NoSandboxProvider => ({
       ): Promise<{ exitCode: number }> => {
         return new Promise((resolve, reject) => {
           const [cmd, ...rest] = args;
+          // Agent CLIs on Windows are typically installed as `.cmd`/`.ps1`
+          // npm wrappers; bare `spawn("claude", …)` only resolves `.exe`
+          // without `shell: true`, so let cmd.exe handle PATHEXT lookup.
           const proc = spawn(cmd!, rest, {
             cwd: opts.cwd ?? worktreePath,
             env: processEnv,
             stdio: [opts.stdin, opts.stdout, opts.stderr] as StdioOptions,
+            shell: process.platform === "win32",
           });
 
           proc.on("error", (error: Error) => {

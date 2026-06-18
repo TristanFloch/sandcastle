@@ -1,8 +1,15 @@
 import { exec } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { Effect, Layer } from "effect";
 import { describe, expect, it } from "vitest";
@@ -12,7 +19,9 @@ import type { SandboxService } from "./SandboxFactory.js";
 import {
   createBindMountSandboxProvider,
   createIsolatedSandboxProvider,
+  type BindMountSandboxHandle,
 } from "./SandboxProvider.js";
+import { encodeProjectPath } from "./SessionStore.js";
 import { testIsolated } from "./sandboxes/test-isolated.js";
 import { makeLocalSandbox } from "./testSandbox.js";
 
@@ -325,6 +334,469 @@ describe("createSandbox", () => {
 
       const log = await readFile(logPath, "utf-8");
       expect(log).toContain("Context window: 50k");
+    } finally {
+      await sandbox.close();
+      await rm(hostDir, { recursive: true, force: true });
+    }
+  });
+
+  it("sandbox.run() captures Claude session and emits 'Context window' from parsed usage (regression: #717)", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "sandbox-claude-cap-"));
+    const hostProjectsDir = await mkdtemp(
+      join(tmpdir(), "sandbox-claude-host-projects-"),
+    );
+    const sandboxProjectsDir = await mkdtemp(
+      join(tmpdir(), "sandbox-claude-sb-projects-"),
+    );
+    await initRepo(hostDir);
+    await commitFile(hostDir, "init.txt", "init", "initial commit");
+    const logPath = join(hostDir, "ctxwin.log");
+    const mockSessionId = "createSandbox-cap-session-1";
+
+    const sandboxBaseDir = mkdtempSync(join(tmpdir(), "sandbox-claude-sb-"));
+
+    // Fake bind-mount handle whose copyFileOut/copyFileIn are filesystem copies.
+    // captureToHost reads the session JSONL out of the sandbox via this handle.
+    const fakeHandle: BindMountSandboxHandle = {
+      worktreePath: sandboxBaseDir,
+      exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      copyFileIn: async (hostPath, sandboxPath) => {
+        await mkdir(dirname(sandboxPath), { recursive: true });
+        await copyFile(hostPath, sandboxPath);
+      },
+      copyFileOut: async (sandboxPath, hostPath) => {
+        await mkdir(dirname(hostPath), { recursive: true });
+        await copyFile(sandboxPath, hostPath);
+      },
+      close: async () => {},
+    };
+
+    const provider = claudeCode("test-model", {
+      sessionStorage: { hostProjectsDir, sandboxProjectsDir },
+    });
+
+    // Build a sandbox layer that intercepts `claude ...` and writes a fake
+    // session JSONL containing a usage block. The orchestrator parses the
+    // captured JSONL via parseSessionUsage and surfaces it as iteration usage.
+    const buildSandbox = (sandboxDir: string): SandboxService => {
+      const real = makeLocalSandbox(sandboxDir);
+      return {
+        exec: (command, options) => {
+          if (command.startsWith("claude ") && options?.onLine) {
+            const onLine = options.onLine;
+            return Effect.gen(function* () {
+              const cwd = options?.cwd ?? sandboxDir;
+              const encoded = encodeProjectPath(cwd);
+              const sessionsDir = join(sandboxProjectsDir, encoded);
+              yield* Effect.promise(async () => {
+                await mkdir(sessionsDir, { recursive: true });
+                await writeFile(
+                  join(sessionsDir, `${mockSessionId}.jsonl`),
+                  [
+                    JSON.stringify({
+                      type: "system",
+                      subtype: "init",
+                      session_id: mockSessionId,
+                      cwd,
+                    }),
+                    JSON.stringify({
+                      type: "assistant",
+                      message: {
+                        model: "claude-opus-4-7",
+                        usage: {
+                          input_tokens: 50000,
+                          cache_creation_input_tokens: 0,
+                          cache_read_input_tokens: 0,
+                          output_tokens: 100,
+                        },
+                      },
+                      cwd,
+                    }),
+                  ].join("\n"),
+                );
+              });
+              const streamLines = [
+                JSON.stringify({
+                  type: "system",
+                  subtype: "init",
+                  session_id: mockSessionId,
+                }),
+                JSON.stringify({
+                  type: "assistant",
+                  message: { content: [{ type: "text", text: "ok" }] },
+                }),
+                JSON.stringify({ type: "result", result: "ok" }),
+              ].join("\n");
+              for (const line of streamLines.split("\n")) {
+                onLine(line);
+              }
+              return { stdout: streamLines, stderr: "", exitCode: 0 };
+            });
+          }
+          return real.exec(command, options);
+        },
+        copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
+        copyFileOut: (sandboxPath, hostPath) =>
+          real.copyFileOut(sandboxPath, hostPath),
+      };
+    };
+
+    const sandbox = await createSandbox({
+      branch: "ctxwin-claude-branch",
+      sandbox: testSandbox,
+      cwd: hostDir,
+      _test: {
+        buildSandbox,
+        bindMountHandle: fakeHandle,
+      },
+    });
+
+    try {
+      const result = await sandbox.run({
+        agent: provider,
+        prompt: "do something",
+        maxIterations: 1,
+        logging: { type: "file", path: logPath },
+      });
+
+      // Usage was parsed out of the captured session JSONL.
+      expect(result.iterations[0]!.usage).toEqual({
+        inputTokens: 50000,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+        outputTokens: 100,
+      });
+      expect(result.iterations[0]!.sessionFilePath).toBeDefined();
+
+      const log = await readFile(logPath, "utf-8");
+      expect(log).toContain("Context window: 50k");
+    } finally {
+      await sandbox.close();
+      await rm(hostDir, { recursive: true, force: true });
+      await rm(hostProjectsDir, { recursive: true, force: true });
+      await rm(sandboxProjectsDir, { recursive: true, force: true });
+      await rm(sandboxBaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("sandbox.run() rejects resumeSession with maxIterations > 1", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "sandbox-resume-validate-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "init.txt", "init", "initial commit");
+
+    const sandbox = await createSandbox({
+      branch: "resume-validate",
+      sandbox: testSandbox,
+      cwd: hostDir,
+      _test: {
+        buildSandbox: (sandboxDir) =>
+          makeMockAgentLayer(sandboxDir, async () => "ok"),
+      },
+    });
+
+    try {
+      await expect(
+        sandbox.run({
+          agent: testProvider,
+          prompt: "do something",
+          maxIterations: 2,
+          resumeSession: "abc-123",
+        }),
+      ).rejects.toThrow(
+        "resumeSession cannot be combined with maxIterations > 1",
+      );
+
+      await expect(
+        sandbox.run({
+          agent: testProvider,
+          prompt: "do something",
+          forkSession: true,
+        }),
+      ).rejects.toThrow("forkSession requires resumeSession");
+    } finally {
+      await sandbox.close();
+      await rm(hostDir, { recursive: true, force: true });
+    }
+  });
+
+  it("sandbox.run().resume() reuses the captured session in the same warm sandbox", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "sandbox-resume-flow-"));
+    const hostProjectsDir = await mkdtemp(
+      join(tmpdir(), "sandbox-resume-host-projects-"),
+    );
+    const sandboxProjectsDir = await mkdtemp(
+      join(tmpdir(), "sandbox-resume-sb-projects-"),
+    );
+    await initRepo(hostDir);
+    await commitFile(hostDir, "init.txt", "init", "initial commit");
+    const mockSessionId = "resume-sandbox-session-1";
+    const sandboxBaseDir = mkdtempSync(join(tmpdir(), "sandbox-resume-sb-"));
+
+    const fakeHandle: BindMountSandboxHandle = {
+      worktreePath: sandboxBaseDir,
+      exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      copyFileIn: async (hostPath, sandboxPath) => {
+        await mkdir(dirname(sandboxPath), { recursive: true });
+        await copyFile(hostPath, sandboxPath);
+      },
+      copyFileOut: async (sandboxPath, hostPath) => {
+        await mkdir(dirname(hostPath), { recursive: true });
+        await copyFile(sandboxPath, hostPath);
+      },
+      close: async () => {},
+    };
+
+    const capturedCommands: string[] = [];
+
+    // Mock agent: writes a session JSONL on every call, and records the
+    // command so we can verify `--resume <id>` is forwarded on the resume
+    // call. The second invocation's session id matches the first so the
+    // resume can be detected without depending on agent CLI parsing.
+    const buildSandbox = (sandboxDir: string): SandboxService => {
+      const real = makeLocalSandbox(sandboxDir);
+      return {
+        exec: (command, options) => {
+          if (command.startsWith("claude ") && options?.onLine) {
+            capturedCommands.push(command);
+            const onLine = options.onLine;
+            return Effect.gen(function* () {
+              const cwd = options?.cwd ?? sandboxDir;
+              const encoded = encodeProjectPath(cwd);
+              const sessionsDir = join(sandboxProjectsDir, encoded);
+              yield* Effect.promise(async () => {
+                await mkdir(sessionsDir, { recursive: true });
+                await writeFile(
+                  join(sessionsDir, `${mockSessionId}.jsonl`),
+                  [
+                    JSON.stringify({
+                      type: "system",
+                      subtype: "init",
+                      session_id: mockSessionId,
+                      cwd,
+                    }),
+                    JSON.stringify({
+                      type: "assistant",
+                      message: {
+                        model: "claude-opus-4-7",
+                        usage: {
+                          input_tokens: 100,
+                          cache_creation_input_tokens: 0,
+                          cache_read_input_tokens: 0,
+                          output_tokens: 50,
+                        },
+                      },
+                      cwd,
+                    }),
+                  ].join("\n"),
+                );
+              });
+              const streamLines = [
+                JSON.stringify({
+                  type: "system",
+                  subtype: "init",
+                  session_id: mockSessionId,
+                }),
+                JSON.stringify({
+                  type: "assistant",
+                  message: { content: [{ type: "text", text: "ok" }] },
+                }),
+                JSON.stringify({ type: "result", result: "ok" }),
+              ].join("\n");
+              for (const line of streamLines.split("\n")) {
+                onLine(line);
+              }
+              return { stdout: streamLines, stderr: "", exitCode: 0 };
+            });
+          }
+          return real.exec(command, options);
+        },
+        copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
+        copyFileOut: (sandboxPath, hostPath) =>
+          real.copyFileOut(sandboxPath, hostPath),
+      };
+    };
+
+    const sandbox = await createSandbox({
+      branch: "resume-flow",
+      sandbox: testSandbox,
+      cwd: hostDir,
+      _test: {
+        buildSandbox,
+        bindMountHandle: fakeHandle,
+      },
+    });
+
+    try {
+      const first = await sandbox.run({
+        agent: claudeCode("test-model", {
+          sessionStorage: { hostProjectsDir, sandboxProjectsDir },
+        }),
+        prompt: "do something",
+        maxIterations: 1,
+      });
+
+      expect(first.iterations[0]!.sessionId).toBe(mockSessionId);
+      expect(typeof first.resume).toBe("function");
+      expect(typeof first.fork).toBe("function");
+
+      const second = await first.resume!("now do something else");
+
+      // The second iteration's agent command must include --resume <sid>.
+      expect(capturedCommands.length).toBe(2);
+      expect(capturedCommands[1]).toContain(`--resume '${mockSessionId}'`);
+      // Resume runs exactly one iteration.
+      expect(second.iterations.length).toBe(1);
+    } finally {
+      await sandbox.close();
+      await rm(hostDir, { recursive: true, force: true });
+      await rm(hostProjectsDir, { recursive: true, force: true });
+      await rm(sandboxProjectsDir, { recursive: true, force: true });
+      await rm(sandboxBaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("sandbox.run() appends raw stdout to the same log file when logging.verbose is true", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "sandbox-verbose-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "init.txt", "init", "initial commit");
+    const logPath = join(hostDir, "verbose.log");
+
+    // Use a mock that emits both a recognised stream-JSON line and a line
+    // parseStreamLine drops (unknown tool) so we can verify ALL stdout
+    // makes it to the log file.
+    const droppedToolLine = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "TotallyUnknownTool",
+            input: { foo: "bar" },
+          },
+        ],
+      },
+    });
+    const recognisedLine = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "hello" }] },
+    });
+
+    const sandbox = await createSandbox({
+      branch: "verbose-branch",
+      sandbox: testSandbox,
+      cwd: hostDir,
+      _test: {
+        buildSandbox: (sandboxDir) => {
+          const real = makeLocalSandbox(sandboxDir);
+          return {
+            exec: (command, options) => {
+              if (command.startsWith("claude ") && options?.onLine) {
+                const onLine = options.onLine;
+                return Effect.gen(function* () {
+                  for (const line of [droppedToolLine, recognisedLine]) {
+                    onLine(line);
+                  }
+                  return {
+                    stdout: [droppedToolLine, recognisedLine].join("\n"),
+                    stderr: "",
+                    exitCode: 0,
+                  };
+                });
+              }
+              return real.exec(command, options);
+            },
+            copyIn: real.copyIn,
+            copyFileOut: real.copyFileOut,
+          };
+        },
+      },
+    });
+
+    try {
+      await sandbox.run({
+        agent: testProvider,
+        prompt: "do something",
+        maxIterations: 1,
+        logging: { type: "file", path: logPath, verbose: true },
+      });
+
+      const log = await readFile(logPath, "utf-8");
+      expect(log).toContain(droppedToolLine);
+      expect(log).toContain(recognisedLine);
+    } finally {
+      await sandbox.close();
+      await rm(hostDir, { recursive: true, force: true });
+    }
+  });
+
+  it("sandbox.run() does NOT append raw stdout to the log file when verbose is false/unset", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "sandbox-verbose-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "init.txt", "init", "initial commit");
+    const logPath = join(hostDir, "verbose-off.log");
+
+    // Same dropped-tool line as the verbose-on test. With verbose unset it
+    // must NOT appear in the log file (parseStreamLine drops it and only
+    // the human-readable output reaches the file).
+    const droppedToolLine = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "TotallyUnknownTool",
+            input: { foo: "bar" },
+          },
+        ],
+      },
+    });
+    const recognisedLine = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "hello" }] },
+    });
+
+    const sandbox = await createSandbox({
+      branch: "verbose-off-branch",
+      sandbox: testSandbox,
+      cwd: hostDir,
+      _test: {
+        buildSandbox: (sandboxDir) => {
+          const real = makeLocalSandbox(sandboxDir);
+          return {
+            exec: (command, options) => {
+              if (command.startsWith("claude ") && options?.onLine) {
+                const onLine = options.onLine;
+                return Effect.gen(function* () {
+                  for (const line of [droppedToolLine, recognisedLine]) {
+                    onLine(line);
+                  }
+                  return {
+                    stdout: [droppedToolLine, recognisedLine].join("\n"),
+                    stderr: "",
+                    exitCode: 0,
+                  };
+                });
+              }
+              return real.exec(command, options);
+            },
+            copyIn: real.copyIn,
+            copyFileOut: real.copyFileOut,
+          };
+        },
+      },
+    });
+
+    try {
+      await sandbox.run({
+        agent: testProvider,
+        prompt: "do something",
+        maxIterations: 1,
+        logging: { type: "file", path: logPath },
+      });
+
+      const log = await readFile(logPath, "utf-8");
+      expect(log).not.toContain(droppedToolLine);
+      expect(log).not.toContain(recognisedLine);
     } finally {
       await sandbox.close();
       await rm(hostDir, { recursive: true, force: true });

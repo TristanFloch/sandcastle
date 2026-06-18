@@ -11,6 +11,7 @@ import {
   resolveGitMounts,
   SANDBOX_REPO_DIR,
 } from "./SandboxFactory.js";
+import { patchGitMountsForWindows } from "./mountUtils.js";
 import {
   withSandboxLifecycle,
   runHostHooks,
@@ -29,6 +30,7 @@ import type { CloseResult, Sandbox } from "./createSandbox.js";
 import { createSandboxFromWorktree } from "./createSandbox.js";
 import type { InteractiveResult } from "./interactive.js";
 import {
+  buildAgentStreamHandler,
   buildCompletionMessage,
   buildContextWindowLines,
   buildLogFilename,
@@ -223,6 +225,12 @@ export const createWorktree = async (
       ? options.branchStrategy.baseBranch
       : undefined;
 
+  // Captured for the worktree's run/interactive/createSandbox methods so they
+  // can route the branch correctly into `SandboxLifecycle`: in `merge-to-head`
+  // mode they pass `branch: undefined` (to trigger the merge step) plus
+  // `keepSourceBranch: true` (so the worktree's source branch survives).
+  const isMergeToHead = options.branchStrategy.type === "merge-to-head";
+
   const { hostRepoDir, worktreeInfo } = await Effect.gen(function* () {
     const hostRepoDir = yield* resolveCwd(options.cwd);
     yield* WorktreeManager.pruneStale(hostRepoDir).pipe(
@@ -359,7 +367,12 @@ export const createWorktree = async (
         handle = startResult.handle;
       } else {
         const gitPath = join(hostRepoDir, ".git");
-        const gitMounts = yield* resolveGitMounts(gitPath);
+        const rawGitMounts = yield* resolveGitMounts(gitPath);
+        const gitMounts = yield* patchGitMountsForWindows(
+          rawGitMounts,
+          worktreeInfo.path,
+          SANDBOX_REPO_DIR,
+        );
         const startResult = yield* d.taskLog("Starting sandbox", () =>
           startSandbox({
             provider: resolvedSandbox,
@@ -395,10 +408,14 @@ export const createWorktree = async (
             hostRepoDir,
             sandboxRepoDir: worktreePath,
             hooks,
-            branch: worktreeInfo.branch,
+            // merge-to-head: pass `undefined` so the lifecycle records the
+            // host's current branch and merges the worktree's commits back into
+            // it. branch strategy: pin to the worktree's branch.
+            branch: isMergeToHead ? undefined : worktreeInfo.branch,
             hostWorktreePath: worktreeInfo.path,
             applyToHost,
             timeouts: options.timeouts,
+            keepSourceBranch: isMergeToHead,
           },
           sandbox,
           (ctx) =>
@@ -559,7 +576,12 @@ export const createWorktree = async (
         sandboxRepoDir = startResult.worktreePath;
       } else {
         const gitPath = join(hostRepoDir, ".git");
-        const gitMounts = yield* resolveGitMounts(gitPath);
+        const rawGitMounts = yield* resolveGitMounts(gitPath);
+        const gitMounts = yield* patchGitMountsForWindows(
+          rawGitMounts,
+          worktreeInfo.path,
+          SANDBOX_REPO_DIR,
+        );
         const startResult = yield* startSandbox({
           provider: sandboxProvider,
           hostRepoDir,
@@ -604,6 +626,14 @@ export const createWorktree = async (
             })()
           : ClackDisplay.layer;
 
+      // Pre-narrow the bind-mount handle for the orchestrator's session-capture
+      // path. Gated on the provider tag so we never hand a NoSandbox/Isolated
+      // handle (which lack copyFileIn/copyFileOut) to AgentSessionStorage.
+      const bindMountHandle =
+        sandboxProvider.tag === "bind-mount"
+          ? (handle as BindMountSandboxHandle)
+          : undefined;
+
       // 6. Build a SandboxFactory that reuses the started sandbox
       const reuseFactoryLayer = Layer.succeed(SandboxFactory, {
         withSandbox: (makeEffect) =>
@@ -612,6 +642,7 @@ export const createWorktree = async (
               hostWorktreePath: worktreeInfo.path,
               sandboxRepoPath: sandboxRepoDir,
               applyToHost,
+              bindMountHandle,
             },
             sandbox,
           ).pipe(
@@ -623,9 +654,7 @@ export const createWorktree = async (
       });
 
       const streamEmitterLayer = agentStreamEmitterLayer(
-        resolvedLogging.type === "file"
-          ? resolvedLogging.onAgentStreamEvent
-          : undefined,
+        buildAgentStreamHandler(resolvedLogging),
       );
 
       const runLayer = Layer.mergeAll(
@@ -644,7 +673,10 @@ export const createWorktree = async (
           iterations: maxIterations,
           hooks,
           prompt: resolvedPrompt,
-          branch: worktreeInfo.branch,
+          // merge-to-head: pass `undefined` so the lifecycle records the host's
+          // current branch and routes through the merge step. branch strategy:
+          // pin to the worktree's branch so commits stay there.
+          branch: isMergeToHead ? undefined : worktreeInfo.branch,
           provider,
           completionSignal: opts.completionSignal,
           idleTimeoutSeconds: opts.idleTimeoutSeconds,
@@ -654,6 +686,7 @@ export const createWorktree = async (
           signal: opts.signal,
           skipPromptExpansion: isInlinePrompt,
           timeouts: options.timeouts,
+          keepSourceBranch: isMergeToHead,
         });
 
         const completion = buildCompletionMessage(
@@ -712,6 +745,7 @@ export const createWorktree = async (
       hooks: opts.hooks,
       copyToWorktree: opts.copyToWorktree,
       timeouts: opts.timeouts,
+      branchStrategy: options.branchStrategy,
       _test: opts._test,
     });
   };
