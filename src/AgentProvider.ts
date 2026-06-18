@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import {
   claudeHostSessionPath,
   claudeSandboxSessionPath,
+  claudeSubagentsDirOnHost,
   encodePiSessionDir,
   findClaudeSessionOnHost,
   findCodexSessionOnHost,
   findPiSessionOnHost,
+  listClaudeSubagentSessionsInSandbox,
   locateCodexHostSession,
   locateCodexSandboxSession,
   locatePiHostSession,
@@ -319,6 +321,34 @@ const writeSandboxFile = async (
   }
 };
 
+/**
+ * Read a Claude JSONL out of the sandbox, rewrite its `cwd` fields from
+ * `fromCwd` → `toCwd`, and write the result to `destPath` on the host. Used
+ * by `captureToHost` for both the main session file and each subagent /
+ * workflow transcript — the read→rewrite→ensure-dir→write sequence is
+ * identical, only the source/dest paths differ.
+ */
+const copyClaudeSessionFile = async ({
+  handle,
+  sourcePath,
+  fromCwd,
+  toCwd,
+  destPath,
+  tag,
+}: {
+  handle: Pick<BindMountSandboxHandle, "copyFileOut">;
+  sourcePath: string;
+  fromCwd: string;
+  toCwd: string;
+  destPath: string;
+  tag: string;
+}): Promise<void> => {
+  const jsonl = await readSandboxFile(handle, sourcePath, tag);
+  const rewritten = transferClaudeSession(jsonl, fromCwd, toCwd);
+  await mkdir(dirname(destPath), { recursive: true });
+  await writeFile(destPath, rewritten);
+};
+
 const makeClaudeSessionStorage = (
   options?: ClaudeCodeOptions,
 ): AgentSessionStorage => {
@@ -338,20 +368,56 @@ const makeClaudeSessionStorage = (
       return readFile(path, "utf-8");
     },
     captureToHost: async ({ hostCwd, sandboxCwd, sessionId, handle }) => {
-      const sandboxPath = claudeSandboxSessionPath(
+      // Main session: failure is fatal — the user expects their session.
+      await copyClaudeSessionFile({
+        handle,
+        sourcePath: claudeSandboxSessionPath(
+          sandboxCwd,
+          sessionId,
+          sandboxProjectsDir,
+        ),
+        fromCwd: sandboxCwd,
+        toCwd: hostCwd,
+        destPath: claudeHostSessionPath(hostCwd, sessionId, hostProjectsDir),
+        tag: "claude-cap",
+      });
+
+      // Subagent / workflow transcripts: best-effort. A missing `subagents/`
+      // dir is the normal case (no Agent-tool / Workflow usage this run);
+      // an individual subagent failing to copy must not abort siblings or
+      // the (already-successful) main capture.
+      const subagentSandboxPaths = await listClaudeSubagentSessionsInSandbox(
         sandboxCwd,
         sessionId,
+        handle,
         sandboxProjectsDir,
       );
-      const jsonl = await readSandboxFile(handle, sandboxPath, "claude-cap");
-      const rewritten = transferClaudeSession(jsonl, sandboxCwd, hostCwd);
-      const hostPath = claudeHostSessionPath(
+      const hostSubagentsDir = claudeSubagentsDirOnHost(
         hostCwd,
         sessionId,
         hostProjectsDir,
       );
-      await mkdir(dirname(hostPath), { recursive: true });
-      await writeFile(hostPath, rewritten);
+      for (const sandboxSubagentPath of subagentSandboxPaths) {
+        try {
+          await copyClaudeSessionFile({
+            handle,
+            sourcePath: sandboxSubagentPath,
+            fromCwd: sandboxCwd,
+            toCwd: hostCwd,
+            destPath: join(
+              hostSubagentsDir,
+              posix.basename(sandboxSubagentPath),
+            ),
+            tag: "claude-sub",
+          });
+        } catch (err) {
+          console.error(
+            `sandcastle: failed to capture Claude subagent transcript ${sandboxSubagentPath}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
     },
     resumeIntoSandbox: async ({ hostCwd, sandboxCwd, sessionId, handle }) => {
       const hostPath = claudeHostSessionPath(
@@ -692,6 +758,16 @@ export interface CodexOptions {
     readonly hostSessionsDir?: string;
     readonly sandboxSessionsDir?: string;
   };
+  /**
+   * Maps to Codex's `approvals_reviewer` config key (set via
+   * `-c approvals_reviewer="<value>"`). When set to `"auto_review"`, the
+   * provider swaps the default `--dangerously-bypass-approvals-and-sandbox`
+   * for an interactive approval policy (`-a on-request`) and Codex's most
+   * permissive sandbox (`-s danger-full-access`) — auto-review needs
+   * something to review, and the safety boundary is the reviewer agent
+   * rather than the filesystem sandbox.
+   */
+  readonly approvalsReviewer?: "user" | "auto_review";
 }
 
 export const codex = (
@@ -711,6 +787,14 @@ export const codex = (
     const effortFlag = options?.effort
       ? ` -c ${shellEscape(`model_reasoning_effort="${options.effort}"`)}`
       : "";
+    // auto_review only fires on interactive approvals, so the bypass flag is
+    // dropped in favour of `-a on-request`. `-s danger-full-access` disables
+    // Codex's own filesystem sandbox — Sandcastle owns that boundary, and
+    // here the reviewer agent owns the per-action approval boundary.
+    const approvalsFlags =
+      options?.approvalsReviewer === "auto_review"
+        ? ` -a on-request -s danger-full-access -c ${shellEscape(`approvals_reviewer="auto_review"`)}`
+        : " --dangerously-bypass-approvals-and-sandbox";
     // Codex distinguishes fork from resume at the verb level — `codex exec
     // fork <id>` leaves the parent rollout intact; `codex exec resume <id>`
     // appends to it. See ADR 0018.
@@ -724,7 +808,7 @@ export const codex = (
     }
     const stdinArg = resumeSession ? " -" : "";
     return {
-      command: `${base} --json --dangerously-bypass-approvals-and-sandbox -m ${shellEscape(model)}${effortFlag}${stdinArg}`,
+      command: `${base} --json${approvalsFlags} -m ${shellEscape(model)}${effortFlag}${stdinArg}`,
       stdin: prompt,
     };
   },
@@ -901,7 +985,10 @@ export const opencode = (
   buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
     const args = ["opencode", "--model", model];
     if (options?.agent) args.push("--agent", options.agent);
-    if (prompt) args.push("-p", prompt);
+    // The TUI's seed-prompt flag is `--prompt` (long form only); `-p` is the
+    // `opencode run`/`attach` basic-auth password flag, not a prompt seed.
+    // Pre-fills the textbox but does not auto-submit (sst/opencode#3937).
+    if (prompt) args.push("--prompt", prompt);
     return args;
   },
 
@@ -1076,6 +1163,19 @@ export interface ClaudeCodeOptions {
     readonly hostProjectsDir?: string;
     readonly sandboxProjectsDir?: string;
   };
+  /**
+   * Maps directly to Claude's `--permission-mode` flag. When set, replaces the
+   * default `--dangerously-skip-permissions` Sandcastle passes on AFK runs —
+   * the two flags are mutually exclusive on Claude's CLI. Use `"auto"` for
+   * AI-mediated per-tool approve/deny on unsandboxed host runs.
+   */
+  readonly permissionMode?:
+    | "default"
+    | "acceptEdits"
+    | "plan"
+    | "auto"
+    | "dontAsk"
+    | "bypassPermissions";
 }
 
 export const claudeCode = (
@@ -1093,9 +1193,14 @@ export const claudeCode = (
     resumeSession,
     forkSession,
   }: AgentCommandOptions): PrintCommand {
-    const skipPerms = dangerouslySkipPermissions
-      ? " --dangerously-skip-permissions"
-      : "";
+    // permissionMode and --dangerously-skip-permissions are mutually exclusive
+    // on Claude's CLI; an explicit mode on the provider takes precedence over
+    // Sandcastle's default bypass.
+    const permissionFlag = options?.permissionMode
+      ? ` --permission-mode ${options.permissionMode}`
+      : dangerouslySkipPermissions
+        ? " --dangerously-skip-permissions"
+        : "";
     const effortFlag = options?.effort ? ` --effort ${options.effort}` : "";
     const resumeFlag = resumeSession
       ? ` --resume ${shellEscape(resumeSession)}`
@@ -1105,7 +1210,7 @@ export const claudeCode = (
     // resumed one. See ADR 0018.
     const forkFlag = resumeSession && forkSession ? " --fork-session" : "";
     return {
-      command: `claude --print --verbose${skipPerms} --output-format stream-json --model ${shellEscape(model)}${effortFlag}${resumeFlag}${forkFlag} -p -`,
+      command: `claude --print --verbose${permissionFlag} --output-format stream-json --model ${shellEscape(model)}${effortFlag}${resumeFlag}${forkFlag} -p -`,
       stdin: prompt,
     };
   },
@@ -1115,7 +1220,11 @@ export const claudeCode = (
     dangerouslySkipPermissions,
   }: AgentCommandOptions): string[] {
     const args = ["claude"];
-    if (dangerouslySkipPermissions) args.push("--dangerously-skip-permissions");
+    if (options?.permissionMode) {
+      args.push("--permission-mode", options.permissionMode);
+    } else if (dangerouslySkipPermissions) {
+      args.push("--dangerously-skip-permissions");
+    }
     args.push("--model", model);
     if (options?.effort) args.push("--effort", options.effort);
     if (prompt) args.push(prompt);

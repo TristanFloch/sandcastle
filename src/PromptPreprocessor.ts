@@ -1,10 +1,6 @@
-import { Effect } from "effect";
+import { Clock, Duration, Effect, Option } from "effect";
 import { Display } from "./Display.js";
-import {
-  PromptError,
-  PromptExpansionTimeoutError,
-  withTimeout,
-} from "./errors.js";
+import { PromptError, PromptExpansionTimeoutError } from "./errors.js";
 import type { ExecError } from "./errors.js";
 import type { SandboxService } from "./SandboxFactory.js";
 
@@ -47,27 +43,37 @@ export const preprocessPrompt = (
         const results = yield* Effect.all(
           matches.map((match) => {
             const command = match[1]!;
-            return Effect.flatMap(
-              sandbox.exec(command, { cwd }),
-              (execResult) =>
-                execResult.exitCode !== 0
-                  ? Effect.fail(
-                      new PromptError({
-                        message: `Command \`${command}\` exited with code ${execResult.exitCode}: ${execResult.stderr}`,
-                      }),
-                    )
-                  : Effect.succeed(execResult.stdout.trimEnd()),
-            ).pipe(
-              withTimeout(
-                PROMPT_EXPANSION_TIMEOUT_MS,
-                () =>
+            return Effect.gen(function* () {
+              const start = yield* Clock.currentTimeMillis;
+              const maybeResult = yield* sandbox
+                .exec(command, { cwd })
+                .pipe(
+                  Effect.timeoutOption(
+                    Duration.millis(PROMPT_EXPANSION_TIMEOUT_MS),
+                  ),
+                );
+              if (Option.isNone(maybeResult)) {
+                const elapsedMs = (yield* Clock.currentTimeMillis) - start;
+                return yield* Effect.fail(
                   new PromptExpansionTimeoutError({
-                    message: `Shell expression \`${command}\` timed out after ${PROMPT_EXPANSION_TIMEOUT_MS}ms`,
+                    message: `Shell expression \`${command}\` timed out after ${elapsedMs}ms`,
                     timeoutMs: PROMPT_EXPANSION_TIMEOUT_MS,
                     expression: command,
+                    elapsedMs,
                   }),
-              ),
-            );
+                );
+              }
+              const execResult = maybeResult.value;
+              if (execResult.exitCode !== 0) {
+                return yield* Effect.fail(
+                  new PromptError({
+                    message: `Command \`${command}\` exited with code ${execResult.exitCode}: ${execResult.stderr}`,
+                    exitCode: execResult.exitCode,
+                  }),
+                );
+              }
+              return execResult.stdout.trimEnd();
+            });
           }),
           { concurrency: "unbounded" },
         );

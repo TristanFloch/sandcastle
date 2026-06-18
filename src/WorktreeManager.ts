@@ -193,14 +193,98 @@ const listWorktrees = (
   );
 
 /**
+ * On the clean-reuse path, fetches `origin/<branch>` into the worktree and
+ * fast-forwards local HEAD. Skipped silently (with an explanatory log) when:
+ *
+ * - HEAD is not attached to `<branch>` — a mid-rebase worktree paused at an
+ *   `edit`/`exec`/`break` instruction has a clean working tree but a detached
+ *   HEAD pointing at the pause point. `git merge --ff-only` there would
+ *   silently advance HEAD past the pause and break `git rebase --continue`;
+ * - the fetch fails (no `origin`, unreachable network, branch missing on
+ *   origin) — the worktree is reused as-is, never breaking the run; or
+ * - the local branch has diverged from `origin/<branch>` (unpushed commits +
+ *   moved origin), in which case `--ff-only` refuses and the unpushed work
+ *   is preserved exactly as it was.
+ *
+ * Errors here are non-fatal by design (ADR 0003): the worst case is the same
+ * stale-but-usable worktree the caller would have had before this refresh
+ * existed.
+ */
+const fastForwardFromOrigin = (
+  worktreePath: string,
+  branch: string,
+): Effect.Effect<void, never> =>
+  Effect.gen(function* () {
+    // `symbolic-ref --quiet HEAD` exits non-zero when HEAD is detached;
+    // map both failure and an unexpected target to "" so the predicate
+    // below treats them the same as "not on this branch".
+    const headRef = yield* execGit(
+      ["symbolic-ref", "--quiet", "HEAD"],
+      worktreePath,
+    ).pipe(
+      Effect.map((s) => s.trim()),
+      Effect.orElseSucceed(() => ""),
+    );
+    if (headRef !== `refs/heads/${branch}`) {
+      console.log(
+        `Reusing worktree at ${worktreePath} (branch '${branch}') — HEAD is not on '${branch}', skipping origin refresh`,
+      );
+      return;
+    }
+    const fetchResult = yield* Effect.either(
+      execGit(
+        [...NO_CONFIG_LOCK_FLAGS, "fetch", "origin", branch],
+        worktreePath,
+      ),
+    );
+    if (fetchResult._tag === "Left") {
+      console.log(
+        `Could not fetch from origin (reusing worktree at ${worktreePath} as-is, branch '${branch}')`,
+      );
+      return;
+    }
+    const before = yield* execGit(["rev-parse", "HEAD"], worktreePath).pipe(
+      Effect.map((s) => s.trim()),
+      Effect.orElseSucceed(() => ""),
+    );
+    const mergeResult = yield* Effect.either(
+      execGit(
+        [...NO_CONFIG_LOCK_FLAGS, "merge", "--ff-only", `origin/${branch}`],
+        worktreePath,
+      ),
+    );
+    if (mergeResult._tag === "Left") {
+      console.log(
+        `Branch '${branch}' has diverged from origin (reusing worktree at ${worktreePath} as-is)`,
+      );
+      return;
+    }
+    const after = yield* execGit(["rev-parse", "HEAD"], worktreePath).pipe(
+      Effect.map((s) => s.trim()),
+      Effect.orElseSucceed(() => ""),
+    );
+    if (before && after && before !== after) {
+      console.log(
+        `Fast-forwarded worktree at ${worktreePath} (branch '${branch}') to origin/${branch}`,
+      );
+    } else {
+      console.log(
+        `Reusing existing worktree at ${worktreePath} (branch '${branch}')`,
+      );
+    }
+  });
+
+/**
  * Creates a git worktree at `.sandcastle/worktrees/<name>/`.
  *
  * - If `branch` is specified, checks out that branch.
  * - If not, creates a temporary `sandcastle/<timestamp>` branch.
  *
  * When `branch` collides with an existing managed worktree:
- * - Clean → reuses the existing worktree.
- * - Dirty (uncommitted changes) → reuses with a console warning (ADR 0003).
+ * - Clean → reuses the existing worktree and fast-forwards it from
+ *   `origin/<branch>` when it is strictly behind (ADR 0003). A failed fetch
+ *   or a diverged branch is non-fatal and falls back to plain reuse.
+ * - Dirty (uncommitted changes) → reuses with a console warning, no refresh.
  *
  * Collisions with the main working tree or external worktrees always throw.
  */
@@ -259,9 +343,7 @@ export const create = (
               `Reusing worktree at ${collision.path} (branch '${branch}') — worktree has uncommitted changes`,
             );
           } else {
-            console.log(
-              `Reusing existing worktree at ${collision.path} (branch '${branch}')`,
-            );
+            yield* fastForwardFromOrigin(collision.path, branch);
           }
           // git reports forward slashes even on Windows; return a
           // platform-native path so downstream join/fs calls stay consistent.

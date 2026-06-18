@@ -65,37 +65,42 @@ describe("InitService scaffold", () => {
   it.each([
     {
       agent: claudeCodeAgent,
-      expectedKey: "ANTHROPIC_API_KEY=",
+      expectedKey: "CLAUDE_CODE_OAUTH_TOKEN=",
       unexpectedKey: "OPENAI_KEY=",
-      expectIssue191Link: true,
+      expectClaudeSetupTokenHint: true,
     },
     {
       agent: piAgent,
       expectedKey: "ANTHROPIC_API_KEY=",
       unexpectedKey: "OPENAI_KEY=",
-      expectIssue191Link: false,
+      expectClaudeSetupTokenHint: false,
     },
     {
       agent: codexAgent,
       expectedKey: "OPENAI_KEY=",
       unexpectedKey: "ANTHROPIC_API_KEY=",
-      expectIssue191Link: false,
+      expectClaudeSetupTokenHint: false,
     },
     {
       agent: opencodeAgent,
       expectedKey: "OPENCODE_API_KEY=",
       unexpectedKey: "ANTHROPIC_API_KEY=",
-      expectIssue191Link: false,
+      expectClaudeSetupTokenHint: false,
     },
     {
       agent: cursorAgent,
       expectedKey: "CURSOR_API_KEY=",
       unexpectedKey: "ANTHROPIC_API_KEY=",
-      expectIssue191Link: false,
+      expectClaudeSetupTokenHint: false,
     },
   ])(
     "generates .env.example with $agent.name env var",
-    async ({ agent, expectedKey, unexpectedKey, expectIssue191Link }) => {
+    async ({
+      agent,
+      expectedKey,
+      unexpectedKey,
+      expectClaudeSetupTokenHint,
+    }) => {
       const dir = await makeDir();
       await runScaffold(dir, { agent, model: agent.defaultModel });
 
@@ -105,10 +110,11 @@ describe("InitService scaffold", () => {
       );
       expect(envExample).toContain(expectedKey);
       expect(envExample).not.toContain(unexpectedKey);
-      if (expectIssue191Link) {
-        expect(envExample).toContain("issues/191");
+      expect(envExample).not.toContain("issues/191");
+      if (expectClaudeSetupTokenHint) {
+        expect(envExample).toContain("claude setup-token");
       } else {
-        expect(envExample).not.toContain("issues/191");
+        expect(envExample).not.toContain("claude setup-token");
       }
     },
   );
@@ -457,6 +463,7 @@ describe("InitService scaffold", () => {
       expect(prompt).toContain(
         "already been filtered to issues ready for work",
       );
+      expect(prompt).toContain("sole source of truth");
       expect(prompt).toContain("Do not run your own unfiltered query");
     });
 
@@ -702,6 +709,43 @@ describe("InitService scaffold", () => {
       expect(next("parallel-planner", "main.mts", "bun").join("\n")).toContain(
         "bun add zod",
       );
+    });
+
+    it("claude-code agent gets a `claude setup-token` hint under the env-vars step", () => {
+      const blank = next("blank", "main.mts").join("\n");
+      const nonBlank = next("simple-loop", "main.mts").join("\n");
+      expect(blank).toContain("claude setup-token");
+      expect(blank).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+      expect(nonBlank).toContain("claude setup-token");
+      expect(nonBlank).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    });
+
+    it("non-claude-code agents do not get the `claude setup-token` hint", () => {
+      const piLines = getNextStepsLines(
+        "simple-loop",
+        "main.mts",
+        ghIssues,
+        piAgent,
+        "npm",
+      ).join("\n");
+      const codexLines = getNextStepsLines(
+        "blank",
+        "main.mts",
+        ghIssues,
+        codexAgent,
+        "npm",
+      ).join("\n");
+      expect(piLines).not.toContain("claude setup-token");
+      expect(piLines).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+      expect(codexLines).not.toContain("claude setup-token");
+      expect(codexLines).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    });
+
+    it("next steps no longer link to the closed issues/191 workaround", () => {
+      const blank = next("blank", "main.mts").join("\n");
+      const nonBlank = next("simple-loop", "main.mts").join("\n");
+      expect(blank).not.toContain("issues/191");
+      expect(nonBlank).not.toContain("issues/191");
     });
 
     it("non-planner template does not mention installing zod", () => {
@@ -1022,8 +1066,8 @@ describe("InitService scaffold", () => {
         join(configDir, ".env.example"),
         "utf-8",
       );
-      // Dynamic env: claude-code agent → ANTHROPIC_API_KEY, default issue tracker → GH_TOKEN
-      expect(envExample).toContain("ANTHROPIC_API_KEY=");
+      // Dynamic env: claude-code agent → CLAUDE_CODE_OAUTH_TOKEN, default issue tracker → GH_TOKEN
+      expect(envExample).toContain("CLAUDE_CODE_OAUTH_TOKEN=");
       expect(envExample).toContain("GH_TOKEN=");
     });
   });
@@ -1209,8 +1253,8 @@ describe("InitService scaffold", () => {
         join(configDir, ".env.example"),
         "utf-8",
       );
-      // Dynamic env: claude-code agent → ANTHROPIC_API_KEY, default issue tracker → GH_TOKEN
-      expect(envExample).toContain("ANTHROPIC_API_KEY=");
+      // Dynamic env: claude-code agent → CLAUDE_CODE_OAUTH_TOKEN, default issue tracker → GH_TOKEN
+      expect(envExample).toContain("CLAUDE_CODE_OAUTH_TOKEN=");
       expect(envExample).toContain("GH_TOKEN=");
     });
 
@@ -1375,7 +1419,7 @@ describe("InitService scaffold", () => {
       { name: "pi", command: `pi "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"` },
       {
         name: "opencode",
-        command: `opencode -p "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
+        command: `opencode --prompt "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
       },
       {
         name: "copilot",
@@ -1508,6 +1552,7 @@ describe("InitService scaffold", () => {
       expect(prompt).toContain(
         "already been filtered to issues ready for work",
       );
+      expect(prompt).toContain("sole source of truth");
       expect(prompt).toContain("Do not run your own unfiltered query");
     });
 

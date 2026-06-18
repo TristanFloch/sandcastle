@@ -23,7 +23,12 @@ import {
 import { resolvePrompt } from "./PromptResolver.js";
 import { preprocessPrompt } from "./PromptPreprocessor.js";
 import type { LoggingOption, Timeouts } from "./run.js";
-import { buildLogFilename, printFileDisplayStartup } from "./run.js";
+import {
+  buildCompletionMessage,
+  buildContextWindowLines,
+  buildLogFilename,
+  printFileDisplayStartup,
+} from "./run.js";
 import {
   withSandboxLifecycle,
   runHostHooks,
@@ -96,6 +101,8 @@ export interface SandboxRunOptions {
   readonly completionSignal?: string | string[];
   /** Idle timeout in seconds. Default: 600. */
   readonly idleTimeoutSeconds?: number;
+  /** Grace window in seconds after a completion signal is observed but the agent process has not exited. See ADR 0019. Default: 60. */
+  readonly completionTimeoutSeconds?: number;
   /** Display name for this run. */
   readonly name?: string;
   /** Logging mode. */
@@ -325,7 +332,7 @@ const buildSandboxHandle = (
             const display = yield* Display;
             yield* display.intro(runOptions.name ?? "sandcastle");
 
-            return yield* orchestrate({
+            const orchestrateResult = yield* orchestrate({
               hostRepoDir,
               iterations: maxIterations,
               prompt: resolvedPrompt,
@@ -333,11 +340,26 @@ const buildSandboxHandle = (
               provider,
               completionSignal: runOptions.completionSignal,
               idleTimeoutSeconds: runOptions.idleTimeoutSeconds,
+              completionTimeoutSeconds: runOptions.completionTimeoutSeconds,
               name: runOptions.name,
               signal: runOptions.signal,
               skipPromptExpansion: isInlinePrompt,
               timeouts,
             });
+
+            const completion = buildCompletionMessage(
+              orchestrateResult.completionSignal,
+              orchestrateResult.iterations.length,
+            );
+            yield* display.status(completion.message, completion.severity);
+
+            for (const line of buildContextWindowLines(
+              orchestrateResult.iterations,
+            )) {
+              yield* display.text(line);
+            }
+
+            return orchestrateResult;
           }).pipe(Effect.provide(runLayer)),
         );
       } catch (error: unknown) {

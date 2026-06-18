@@ -3774,3 +3774,262 @@ describe("Orchestrator signal (AbortSignal)", () => {
     expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
   });
 });
+
+describe("Orchestrator completion timeout (hanging process)", () => {
+  /**
+   * Build a mock sandbox layer where the `claude` exec emits the given lines
+   * via `onLine` and then *never resolves*. Used to simulate a hanging child
+   * process keeping stdout open after the agent's logical turn ends.
+   */
+  const makeHangingClaudeAgentLayer = (
+    sandboxDir: string,
+    lines: string[],
+  ): SandboxService => {
+    const real = makeLocalSandbox(sandboxDir);
+    return {
+      exec: (command, options) => {
+        if (command.startsWith("claude ") && options?.onLine) {
+          const onLine = options.onLine;
+          return Effect.gen(function* () {
+            for (const line of lines) {
+              onLine(line);
+            }
+            // Never resolve — simulate a hanging child holding stdout open.
+            yield* Effect.never;
+            return { stdout: "", stderr: "", exitCode: 0 };
+          });
+        }
+        return real.exec(command, options);
+      },
+      copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
+      copyFileOut: (sandboxPath, hostPath) =>
+        real.copyFileOut(sandboxPath, hostPath),
+    };
+  };
+
+  it("succeeds with completionSignal set when the agent hangs after emitting the signal", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-comp-hang-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const lines = [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "text",
+              text: "All done. <promise>COMPLETE</promise>",
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: "result",
+        result: "All done. <promise>COMPLETE</promise>",
+      }),
+    ];
+
+    const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) =>
+      makeHangingClaudeAgentLayer(dir, lines),
+    );
+
+    const result = await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do some work",
+        completionTimeoutSeconds: 0.2, // 200ms grace window for the test
+        idleTimeoutSeconds: 30, // way larger than the test runtime
+      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+    );
+
+    expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
+    expect(result.iterations.length).toBe(1);
+  }, 10_000);
+
+  it("falls through to the idle timeout when the agent hangs WITHOUT emitting the signal", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-comp-noidle-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const lines = [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "still thinking..." }],
+        },
+      }),
+    ];
+
+    const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) =>
+      makeHangingClaudeAgentLayer(dir, lines),
+    );
+
+    const exitResult = await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do some work",
+        idleTimeoutSeconds: 0.15, // 150ms — fires because no signal was seen
+        completionTimeoutSeconds: 0.05, // would-be grace window, must not apply
+      }).pipe(
+        Effect.provide(Layer.merge(factoryLayer, testDisplayLayer)),
+        Effect.exit,
+      ),
+    );
+
+    expect(exitResult._tag).toBe("Failure");
+    if (exitResult._tag === "Failure") {
+      const err = Cause.squash(exitResult.cause);
+      expect(err).toBeInstanceOf(AgentIdleTimeoutError);
+    }
+  }, 10_000);
+
+  it("resets the completion timer on trailing output and includes it in stdout", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-comp-trailing-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    // After the signal: emit a trailing usage/result line ~120ms later. With a
+    // 200ms grace window the trailing line MUST land before the timer fires
+    // and MUST reset it, so the run succeeds and the trailing text is in stdout.
+    const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) => {
+      const real = makeLocalSandbox(dir);
+      return {
+        exec: (command, options) => {
+          if (command.startsWith("claude ") && options?.onLine) {
+            const onLine = options.onLine;
+            return Effect.gen(function* () {
+              onLine(
+                JSON.stringify({
+                  type: "assistant",
+                  message: {
+                    content: [
+                      {
+                        type: "text",
+                        text: "Plan ready. <promise>COMPLETE</promise>",
+                      },
+                    ],
+                  },
+                }),
+              );
+              yield* Effect.promise(
+                () => new Promise((resolve) => setTimeout(resolve, 120)),
+              );
+              onLine(
+                JSON.stringify({
+                  type: "result",
+                  result:
+                    "Plan ready. <promise>COMPLETE</promise>\nTRAILING_TOKEN",
+                }),
+              );
+              // Hang forever after trailing output.
+              yield* Effect.never;
+              return { stdout: "", stderr: "", exitCode: 0 };
+            });
+          }
+          return real.exec(command, options);
+        },
+        copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
+        copyFileOut: (sandboxPath, hostPath) =>
+          real.copyFileOut(sandboxPath, hostPath),
+      };
+    });
+
+    const result = await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do some work",
+        completionTimeoutSeconds: 0.2,
+        idleTimeoutSeconds: 30,
+      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+    );
+
+    expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
+    expect(result.stdout).toContain("TRAILING_TOKEN");
+  }, 10_000);
+
+  it("adds no latency when the agent exits cleanly after the signal", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-comp-fast-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) =>
+      makeMockAgentLayer(
+        dir,
+        async () => "All done. <promise>COMPLETE</promise>",
+      ),
+    );
+
+    const start = Date.now();
+    const result = await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do some work",
+        // Large completion timeout — clean exit must NOT wait for it.
+        completionTimeoutSeconds: 30,
+      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+    );
+    const elapsedMs = Date.now() - start;
+
+    expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
+    // Clean exit beats the grace window — no waiting added.
+    expect(elapsedMs).toBeLessThan(2_000);
+  }, 10_000);
+
+  it("emits a warning when the completion timeout fires", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-comp-warn-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const lines = [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "text",
+              text: "Final answer <promise>COMPLETE</promise>",
+            },
+          ],
+        },
+      }),
+    ];
+
+    const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) =>
+      makeHangingClaudeAgentLayer(dir, lines),
+    );
+
+    const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
+    const displayLayer = Layer.merge(
+      SilentDisplay.layer(ref),
+      noopAgentStreamEmitterLayer,
+    );
+
+    await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do some work",
+        completionTimeoutSeconds: 0.1,
+        idleTimeoutSeconds: 30,
+      }).pipe(Effect.provide(Layer.merge(factoryLayer, displayLayer))),
+    );
+
+    const entries = await Effect.runPromise(Ref.get(ref));
+    const warnEntries = entries.filter(
+      (e) => e._tag === "status" && e.severity === "warn",
+    ) as { _tag: "status"; message: string; severity: "warn" }[];
+    expect(
+      warnEntries.some((e) => /hang|completion timeout/i.test(e.message)),
+    ).toBe(true);
+  }, 10_000);
+});

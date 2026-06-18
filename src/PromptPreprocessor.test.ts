@@ -1,4 +1,12 @@
-import { Effect, Layer, Ref } from "effect";
+import {
+  Duration,
+  Effect,
+  Exit,
+  Layer,
+  Ref,
+  TestClock,
+  TestContext,
+} from "effect";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +16,7 @@ import { preprocessPrompt } from "./PromptPreprocessor.js";
 import { substitutePromptArgs } from "./PromptArgumentSubstitution.js";
 import type { SandboxService } from "./SandboxFactory.js";
 import { makeLocalSandbox } from "./testSandbox.js";
-import { PromptError } from "./errors.js";
+import { PromptError, PromptExpansionTimeoutError } from "./errors.js";
 
 describe("PromptPreprocessor", () => {
   const setup = async () => {
@@ -56,10 +64,10 @@ describe("PromptPreprocessor", () => {
     expect(result).toBe("First: hello\nSecond: world");
   });
 
-  it("fails with PromptError on non-zero exit code", async () => {
+  it("fails with PromptError on non-zero exit code and carries exitCode", async () => {
     const { sandboxDir, sandbox, displayLayer } = await setup();
     const marked = await Effect.runPromise(
-      substitutePromptArgs("Output: !`exit 1`", {}).pipe(
+      substitutePromptArgs("Output: !`exit 7`", {}).pipe(
         Effect.provide(displayLayer),
       ),
     );
@@ -71,8 +79,10 @@ describe("PromptPreprocessor", () => {
     );
     expect(result).toBeInstanceOf(PromptError);
     expect(result._tag).toBe("PromptError");
-    expect(result.message).toContain("exit 1");
-    expect(result.message).toContain("exited with code 1");
+    expect(result.message).toContain("exit 7");
+    expect(result.message).toContain("exited with code 7");
+    if (result._tag !== "PromptError") throw new Error("unreachable");
+    expect(result.exitCode).toBe(7);
   });
 
   it("runs commands with the provided cwd", async () => {
@@ -196,6 +206,47 @@ describe("PromptPreprocessor", () => {
       ),
     );
     expect(result).toBe("Payload: !`rm -rf /`");
+  });
+
+  it("fails with PromptExpansionTimeoutError carrying elapsedMs measured at the throw site", async () => {
+    const { sandboxDir, displayLayer } = await setup();
+    const hangingSandbox: SandboxService = {
+      exec: () => Effect.never,
+      copyIn: () => Effect.succeed(undefined as never),
+      copyFileOut: () => Effect.succeed(undefined as never),
+    };
+
+    const marked = await Effect.runPromise(
+      substitutePromptArgs("Hang: !`sleep forever`", {}).pipe(
+        Effect.provide(displayLayer),
+      ),
+    );
+
+    const program = Effect.gen(function* () {
+      const fiber = yield* Effect.fork(
+        preprocessPrompt(marked, hangingSandbox, sandboxDir).pipe(
+          Effect.provide(displayLayer),
+        ),
+      );
+      // Advance virtual clock past the 30s prompt-expansion timeout.
+      yield* TestClock.adjust(Duration.millis(30_001));
+      return yield* fiber.await;
+    }).pipe(Effect.provide(TestContext.TestContext));
+
+    const exit = await Effect.runPromise(program);
+
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (!Exit.isFailure(exit) || exit.cause._tag !== "Fail") {
+      throw new Error("Expected Fail cause");
+    }
+    const error = exit.cause.error;
+    expect(error).toBeInstanceOf(PromptExpansionTimeoutError);
+    if (!(error instanceof PromptExpansionTimeoutError)) {
+      throw new Error("unreachable");
+    }
+    expect(error.expression).toBe("sleep forever");
+    expect(error.timeoutMs).toBe(30_000);
+    expect(error.elapsedMs).toBeGreaterThanOrEqual(30_000);
   });
 
   it("does not show taskLog when prompt has no commands", async () => {

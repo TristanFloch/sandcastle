@@ -413,9 +413,11 @@ const AGENT_REGISTRY: AgentEntry[] = [
     defaultModel: "claude-opus-4-7",
     factoryImport: "claudeCode",
     dockerfileTemplate: CLAUDE_CODE_DOCKERFILE,
-    envExample: `# Anthropic API key
-# If you want to use your Claude subscription instead of an API key, see https://github.com/mattpocock/sandcastle/issues/191
-ANTHROPIC_API_KEY=`,
+    envExample: `# Claude Code OAuth token — get one by running \`claude setup-token\` on your host.
+# Lets the agent use your Claude subscription instead of an API key.
+CLAUDE_CODE_OAUTH_TOKEN=
+# Or use an Anthropic API key instead — uncomment and fill in:
+# ANTHROPIC_API_KEY=`,
     setupCommand: `claude "$(cat ${SETUP_ISSUE_TRACKER_PATH})"`,
   },
   {
@@ -431,7 +433,7 @@ ANTHROPIC_API_KEY=`,
   {
     name: "codex",
     label: "Codex",
-    defaultModel: "gpt-5.4-mini",
+    defaultModel: "gpt-5.4",
     factoryImport: "codex",
     dockerfileTemplate: CODEX_DOCKERFILE,
     envExample: `# OpenAI API key
@@ -457,7 +459,7 @@ CURSOR_API_KEY=`,
     dockerfileTemplate: OPENCODE_DOCKERFILE,
     envExample: `# OpenCode API key
 OPENCODE_API_KEY=`,
-    setupCommand: `opencode -p "$(cat ${SETUP_ISSUE_TRACKER_PATH})"`,
+    setupCommand: `opencode --prompt "$(cat ${SETUP_ISSUE_TRACKER_PATH})"`,
   },
   {
     name: "copilot",
@@ -639,15 +641,22 @@ export function getNextStepsLines(
     ];
   }
   if (template === "blank") {
-    return [
+    const lines = [
       "Next steps:",
       `1. Set the required env vars in .sandcastle/.env (see .sandcastle/.env.example)`,
-      "   If you want to use your Claude subscription instead of an API key, see https://github.com/mattpocock/sandcastle/issues/191",
+    ];
+    if (agent.name === "claude-code") {
+      lines.push(
+        "   To use your Claude subscription instead of an API key, run `claude setup-token` on your host and paste the result into CLAUDE_CODE_OAUTH_TOKEN.",
+      );
+    }
+    lines.push(
       "2. Read and customize .sandcastle/prompt.md to describe what you want the agent to do",
       `3. Customize .sandcastle/${mainFilename} — it uses the JS API (\`run()\`) to control how the agent runs`,
       `4. Add "sandcastle": "npx tsx .sandcastle/${mainFilename}" to your package.json scripts`,
       "5. Run `npm run sandcastle` to start the agent",
-    ];
+    );
+    return lines;
   } else {
     const hasReviewer = template.includes("review");
     const usesPlanSchema = getTemplateDependencies(template).includes("zod");
@@ -655,10 +664,16 @@ export function getNextStepsLines(
     const lines: string[] = [
       "Next steps:",
       `${step++}. Set the required env vars in .sandcastle/.env (see .sandcastle/.env.example)`,
-      "   If you want to use your Claude subscription instead of an API key, see https://github.com/mattpocock/sandcastle/issues/191",
+    ];
+    if (agent.name === "claude-code") {
+      lines.push(
+        "   To use your Claude subscription instead of an API key, run `claude setup-token` on your host and paste the result into CLAUDE_CODE_OAUTH_TOKEN.",
+      );
+    }
+    lines.push(
       `${step++}. Add "sandcastle": "npx tsx .sandcastle/${mainFilename}" to your package.json scripts`,
       `${step++}. Templates use \`copyToWorktree: ["node_modules"]\` to copy your host node_modules into the sandbox for fast startup — the \`npm install\` in the onSandboxReady hook is a safety net for platform-specific binaries. Adjust both if you use a different package manager`,
-    ];
+    );
     if (usesPlanSchema) {
       lines.push(
         `${step++}. Install a schema validator for the planner's \`<plan>\` output — the template uses Zod (\`${addDependencyCommand(packageManager, "zod")}\`), but Valibot, ArkType, or any Standard Schema library works (https://standardschema.dev)`,

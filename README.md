@@ -39,7 +39,7 @@ npm install --save-dev @ai-hero/sandcastle
 npx @ai-hero/sandcastle init
 ```
 
-3. Edit `.sandcastle/.env` and fill in your default values for `ANTHROPIC_API_KEY`. If you want to use your Claude subscription instead of an API key, see [#191](https://github.com/mattpocock/sandcastle/issues/191).
+3. Edit `.sandcastle/.env` and fill in your default values for `CLAUDE_CODE_OAUTH_TOKEN` (run `claude setup-token` on your host to get one). To use an Anthropic API key instead, uncomment and fill in `ANTHROPIC_API_KEY`.
 
 ```bash
 cp .sandcastle/.env.example .sandcastle/.env
@@ -234,6 +234,12 @@ const result = await run({
   // Idle timeout in seconds — resets whenever the agent produces output. Default: 600 (10 minutes)
   idleTimeoutSeconds: 600,
 
+  // Grace window in seconds after the agent emits a completion signal but
+  // before its process has exited (a "hanging process" — typically a spawned
+  // `gh`/git child or MCP server keeping stdout open). Resets on every
+  // subsequent output line so trailing data is still captured. Default: 60
+  completionTimeoutSeconds: 60,
+
   // Structured output — extract a typed payload from the agent's stdout.
   // Requires maxIterations === 1 and the tag must appear in the prompt.
   // output: Output.object({ tag: "result", schema: z.object({ answer: z.number() }) }),
@@ -341,18 +347,19 @@ if (closeResult.preservedWorktreePath) {
 
 #### `SandboxRunOptions`
 
-| Option               | Type               | Default                       | Description                                                         |
-| -------------------- | ------------------ | ----------------------------- | ------------------------------------------------------------------- |
-| `agent`              | AgentProvider      | —                             | **Required.** Agent provider (e.g. `claudeCode("claude-opus-4-7")`) |
-| `prompt`             | string             | —                             | Inline prompt (mutually exclusive with `promptFile`)                |
-| `promptFile`         | string             | —                             | Path to prompt file (mutually exclusive with `prompt`)              |
-| `promptArgs`         | PromptArgs         | —                             | Key-value map for `{{KEY}}` placeholder substitution                |
-| `maxIterations`      | number             | `1`                           | Maximum iterations to run                                           |
-| `completionSignal`   | string \| string[] | `<promise>COMPLETE</promise>` | String(s) the agent emits to stop the iteration loop early          |
-| `idleTimeoutSeconds` | number             | `600`                         | Idle timeout in seconds — resets on each agent output event         |
-| `name`               | string             | —                             | Display name for the run                                            |
-| `logging`            | object             | file (auto-generated)         | `{ type: 'file', path }` or `{ type: 'stdout' }`                    |
-| `signal`             | AbortSignal        | —                             | Cancels the run when aborted; handle stays usable afterward         |
+| Option                     | Type               | Default                       | Description                                                                          |
+| -------------------------- | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------ |
+| `agent`                    | AgentProvider      | —                             | **Required.** Agent provider (e.g. `claudeCode("claude-opus-4-7")`)                  |
+| `prompt`                   | string             | —                             | Inline prompt (mutually exclusive with `promptFile`)                                 |
+| `promptFile`               | string             | —                             | Path to prompt file (mutually exclusive with `prompt`)                               |
+| `promptArgs`               | PromptArgs         | —                             | Key-value map for `{{KEY}}` placeholder substitution                                 |
+| `maxIterations`            | number             | `1`                           | Maximum iterations to run                                                            |
+| `completionSignal`         | string \| string[] | `<promise>COMPLETE</promise>` | String(s) the agent emits to stop the iteration loop early                           |
+| `idleTimeoutSeconds`       | number             | `600`                         | Idle timeout in seconds — resets on each agent output event                          |
+| `completionTimeoutSeconds` | number             | `60`                          | Grace window after the completion signal is seen but the agent process hasn't exited |
+| `name`                     | string             | —                             | Display name for the run                                                             |
+| `logging`                  | object             | file (auto-generated)         | `{ type: 'file', path }` or `{ type: 'stdout' }`                                     |
+| `signal`                   | AbortSignal        | —                             | Cancels the run when aborted; handle stays usable afterward                          |
 
 #### `SandboxRunResult`
 
@@ -459,22 +466,23 @@ await sandbox.close();
 
 #### `WorktreeRunOptions`
 
-| Option               | Type                   | Default | Description                                                                                                                          |
-| -------------------- | ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `agent`              | AgentProvider          | —       | **Required.** Agent provider                                                                                                         |
-| `sandbox`            | SandboxProvider        | —       | **Required.** Sandbox provider (AFK agents must be sandboxed)                                                                        |
-| `prompt`             | string                 | —       | Inline prompt (mutually exclusive with `promptFile`)                                                                                 |
-| `promptFile`         | string                 | —       | Path to prompt file                                                                                                                  |
-| `maxIterations`      | number                 | 1       | Maximum iterations to run                                                                                                            |
-| `completionSignal`   | string \| string[]     | —       | Substring(s) to stop the iteration loop early                                                                                        |
-| `idleTimeoutSeconds` | number                 | 600     | Idle timeout in seconds                                                                                                              |
-| `name`               | string                 | —       | Optional run name                                                                                                                    |
-| `logging`            | LoggingOption          | file    | Logging mode                                                                                                                         |
-| `hooks`              | SandboxHooks           | —       | Lifecycle hooks (`host.*`, `sandbox.*`)                                                                                              |
-| `promptArgs`         | PromptArgs             | —       | Key-value map for `{{KEY}}` placeholder substitution                                                                                 |
-| `env`                | Record<string, string> | —       | Environment variables to inject into the sandbox                                                                                     |
-| `resumeSession`      | string                 | —       | Resume a prior session by ID for agents that support resume. Incompatible with `maxIterations > 1`. Session file must exist on host. |
-| `signal`             | AbortSignal            | —       | Cancel the run when aborted. Kills the in-flight agent subprocess; the worktree is preserved on disk. Rejects with `signal.reason`.  |
+| Option                     | Type                   | Default | Description                                                                                                                          |
+| -------------------------- | ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `agent`                    | AgentProvider          | —       | **Required.** Agent provider                                                                                                         |
+| `sandbox`                  | SandboxProvider        | —       | **Required.** Sandbox provider (AFK agents must be sandboxed)                                                                        |
+| `prompt`                   | string                 | —       | Inline prompt (mutually exclusive with `promptFile`)                                                                                 |
+| `promptFile`               | string                 | —       | Path to prompt file                                                                                                                  |
+| `maxIterations`            | number                 | 1       | Maximum iterations to run                                                                                                            |
+| `completionSignal`         | string \| string[]     | —       | Substring(s) to stop the iteration loop early                                                                                        |
+| `idleTimeoutSeconds`       | number                 | 600     | Idle timeout in seconds                                                                                                              |
+| `completionTimeoutSeconds` | number                 | 60      | Grace window after completion signal is seen but agent process hasn't exited                                                         |
+| `name`                     | string                 | —       | Optional run name                                                                                                                    |
+| `logging`                  | LoggingOption          | file    | Logging mode                                                                                                                         |
+| `hooks`                    | SandboxHooks           | —       | Lifecycle hooks (`host.*`, `sandbox.*`)                                                                                              |
+| `promptArgs`               | PromptArgs             | —       | Key-value map for `{{KEY}}` placeholder substitution                                                                                 |
+| `env`                      | Record<string, string> | —       | Environment variables to inject into the sandbox                                                                                     |
+| `resumeSession`            | string                 | —       | Resume a prior session by ID for agents that support resume. Incompatible with `maxIterations > 1`. Session file must exist on host. |
+| `signal`                   | AbortSignal            | —       | Cancel the run when aborted. Kills the in-flight agent subprocess; the worktree is preserved on disk. Rejects with `signal.reason`.  |
 
 #### `WorktreeRunResult`
 
@@ -502,7 +510,7 @@ Sandcastle uses a **branch strategy** configured on the sandbox provider to cont
 
 - **Head** (`{ type: "head" }`) — The agent writes directly to the host working directory. No worktree, no branch indirection. This is the default for bind-mount providers like `docker()`.
 - **Merge-to-head** (`{ type: "merge-to-head" }`) — Sandcastle creates a temporary branch in a git worktree. The agent works on the temp branch, and changes are merged back to HEAD when done. The temp branch is cleaned up after merge.
-- **Branch** (`{ type: "branch", branch: "foo" }`) — Commits land on an explicitly named branch in a git worktree.
+- **Branch** (`{ type: "branch", branch: "foo" }`) — Commits land on an explicitly named branch in a git worktree. Re-running with the same branch reuses the existing worktree and fast-forwards it from `origin` when safe — see [ADR 0003](docs/adr/0003-reuse-worktree-by-default.md).
 
 For bind-mount providers (like Docker), the worktree directory is bind-mounted into the container — the agent writes directly to the host filesystem through the mount, so no sync is needed.
 
@@ -614,6 +622,25 @@ await run({
 
 Tell the agent to output your chosen string(s) in the prompt, and the orchestrator will stop when it detects any of them. The matched signal is returned as `result.completionSignal`.
 
+#### Hanging processes after the completion signal
+
+The agent process is expected to exit shortly after emitting the completion signal. When a child it spawned — a `gh`/git subprocess, a long-lived MCP server, etc. — inherits the agent's stdout pipe and keeps it open, the parent process can linger long past its logical end. Sandcastle would otherwise wait for the full `idleTimeoutSeconds` and fail with `AgentIdleTimeoutError`, throwing away the commits the agent already made.
+
+Instead, once the completion signal is observed in the output buffer, Sandcastle swaps in a short **completion timeout** (default 60 s). When it expires, the run resolves successfully with a warning that the process was hanging; `result.commits` and `result.completionSignal` are populated as if the process had exited cleanly. The timer resets on every subsequent output line, so trailing data emitted after the signal — token-usage events, terminal `result` events, a structured-output `<tag>` — is still captured.
+
+A clean process exit always wins the race, so healthy runs gain zero added latency. The completion timeout only matters when the process hangs.
+
+Tune the window with `completionTimeoutSeconds`:
+
+```ts
+await run({
+  // ...
+  completionTimeoutSeconds: 30, // shorter grace window
+});
+```
+
+This is independent of `idleTimeoutSeconds`. They cover different phases: `idleTimeoutSeconds` runs **before** any signal is seen (genuinely stuck agent → fail); `completionTimeoutSeconds` runs **after** the signal is seen (hanging process → succeed with warning). See [ADR 0019](docs/adr/0019-completion-timeout-for-hanging-process.md).
+
 ### Structured output
 
 Use `Output.object()` to extract a typed, schema-validated JSON payload from the agent's stdout. The agent emits its answer inside an XML tag you specify, and Sandcastle parses, validates, and returns it on `result.output`. The schema can be any [Standard Schema](https://standardschema.dev) validator — the examples below use [Zod](https://zod.dev), but Valibot, ArkType, and others work identically. See [ADR 0010](docs/adr/0010-structured-output.md) for design rationale.
@@ -684,13 +711,19 @@ Scaffolds the `.sandcastle/` config directory and builds the container image. Th
 
 Init detects your host package manager (npm, pnpm, yarn, or bun) from a `packageManager` field or lockfile, defaulting to npm. Templates whose `main` file imports a host dependency — the planner templates import [Zod](https://zod.dev) for their `<plan>` output schema — prompt you to install it with that package manager when it isn't already in your `package.json`, so the first `npx tsx .sandcastle/main.ts` doesn't fail with `ERR_MODULE_NOT_FOUND`.
 
-| Option         | Required | Default                      | Description                                                                  |
-| -------------- | -------- | ---------------------------- | ---------------------------------------------------------------------------- |
-| `--image-name` | No       | `sandcastle:<repo-dir-name>` | Docker image name                                                            |
-| `--agent`      | No       | Interactive prompt           | Agent to use (`claude-code`, `pi`, `codex`, `cursor`, `opencode`, `copilot`) |
-| `--model`      | No       | Agent's default model        | Model to use (e.g. `claude-sonnet-4-6`). Defaults to agent's default         |
-| `--sandbox`    | No       | Interactive prompt           | Sandbox provider to use (`docker`, `podman`)                                 |
-| `--template`   | No       | Interactive prompt           | Template to scaffold (e.g. `blank`, `simple-loop`)                           |
+Every interactive prompt has a paired `--flag` so the entire init can run non-interactively (e.g. in CI or a scripted setup). When stdin is not a TTY and a required flag is missing, init fails fast with a clear error rather than wedging on a prompt.
+
+| Option                    | Required | Default                      | Description                                                                                                    |
+| ------------------------- | -------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `--image-name`            | No       | `sandcastle:<repo-dir-name>` | Docker image name                                                                                              |
+| `--agent`                 | No       | Interactive prompt           | Agent to use (`claude-code`, `pi`, `codex`, `cursor`, `opencode`, `copilot`)                                   |
+| `--model`                 | No       | Agent's default model        | Model to use (e.g. `claude-sonnet-4-6`). Defaults to agent's default                                           |
+| `--sandbox`               | No       | Interactive prompt           | Sandbox provider to use (`docker`, `podman`)                                                                   |
+| `--template`              | No       | Interactive prompt           | Template to scaffold (e.g. `blank`, `simple-loop`)                                                             |
+| `--issue-tracker`         | No       | Interactive prompt           | Issue tracker to use (`github-issues`, `beads`, `custom`)                                                      |
+| `--create-label`          | No       | Interactive prompt           | `true` / `false` — whether to create the `Sandcastle` GitHub label (only with `--issue-tracker github-issues`) |
+| `--build-image`           | No       | Interactive prompt           | `true` / `false` — whether to build the sandbox image now (silently ignored with `--issue-tracker custom`)     |
+| `--install-template-deps` | No       | Interactive prompt           | `true` / `false` — whether to install template host deps (e.g. `zod` for the planner templates)                |
 
 Creates the following files:
 
@@ -740,26 +773,27 @@ Removes the Podman image.
 
 ### `RunOptions`
 
-| Option               | Type               | Default                       | Description                                                                                                                                                                                                        |
-| -------------------- | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `agent`              | AgentProvider      | —                             | **Required.** Agent provider (e.g. `claudeCode("claude-opus-4-7")`, `pi("claude-sonnet-4-6")`, `codex("gpt-5.4-mini")`, `cursor("composer-2")`, `opencode("opencode/big-pickle")`, `copilot("claude-sonnet-4.5")`) |
-| `sandbox`            | SandboxProvider    | —                             | **Required.** Sandbox provider (e.g. `docker()`, `podman()`, `docker({ imageName: "sandcastle:local" })`)                                                                                                          |
-| `cwd`                | string             | `process.cwd()`               | Host repo directory — anchor for `.sandcastle/` artifacts and git operations. Relative paths resolve against `process.cwd()`.                                                                                      |
-| `prompt`             | string             | —                             | Inline prompt (mutually exclusive with `promptFile`)                                                                                                                                                               |
-| `promptFile`         | string             | —                             | Path to prompt file (mutually exclusive with `prompt`). Resolves against `process.cwd()`, **not** `cwd`.                                                                                                           |
-| `maxIterations`      | number             | `1`                           | Maximum iterations to run                                                                                                                                                                                          |
-| `hooks`              | SandboxHooks       | —                             | Lifecycle hooks (`host.*`, `sandbox.*`)                                                                                                                                                                            |
-| `name`               | string             | —                             | Display name for the run, shown as a prefix in log output                                                                                                                                                          |
-| `promptArgs`         | PromptArgs         | —                             | Key-value map for `{{KEY}}` placeholder substitution                                                                                                                                                               |
-| `branchStrategy`     | BranchStrategy     | per-provider default          | Branch strategy: `{ type: 'head' }`, `{ type: 'merge-to-head' }`, or `{ type: 'branch', branch: '…' }`                                                                                                             |
-| `copyToWorktree`     | string[]           | —                             | Host-relative file paths to copy into the sandbox before start (not supported with `branchStrategy: { type: 'head' }`)                                                                                             |
-| `logging`            | object             | file (auto-generated)         | `{ type: 'file', path }` or `{ type: 'stdout' }`                                                                                                                                                                   |
-| `completionSignal`   | string \| string[] | `<promise>COMPLETE</promise>` | String or array of strings the agent emits to stop the iteration loop early                                                                                                                                        |
-| `idleTimeoutSeconds` | number             | `600`                         | Idle timeout in seconds — resets on each agent output event                                                                                                                                                        |
-| `resumeSession`      | string             | —                             | Resume a prior session by ID for agents that support resume. Incompatible with `maxIterations > 1`. Session file must exist on host.                                                                               |
-| `signal`             | AbortSignal        | —                             | Cancel the run when aborted. Kills the in-flight agent subprocess and cancels lifecycle hooks; the worktree is preserved on disk. Rejects with `signal.reason`.                                                    |
-| `timeouts`           | Timeouts           | —                             | Override default timeouts for built-in lifecycle steps: `copyToWorktreeMs` (60 000), `gitSetupMs` (10 000), `commitCollectionMs` (30 000), `mergeToHostMs` (30 000).                                               |
-| `output`             | OutputDefinition   | —                             | Structured output definition (`Output.object(…)` or `Output.string(…)`). Requires `maxIterations === 1`. See [Structured output](#structured-output).                                                              |
+| Option                     | Type               | Default                       | Description                                                                                                                                                                                                                  |
+| -------------------------- | ------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent`                    | AgentProvider      | —                             | **Required.** Agent provider (e.g. `claudeCode("claude-opus-4-7")`, `pi("claude-sonnet-4-6")`, `codex("gpt-5.4")`, `cursor("composer-2")`, `opencode("opencode/big-pickle")`, `copilot("claude-sonnet-4.5")`)                |
+| `sandbox`                  | SandboxProvider    | —                             | **Required.** Sandbox provider (e.g. `docker()`, `podman()`, `docker({ imageName: "sandcastle:local" })`)                                                                                                                    |
+| `cwd`                      | string             | `process.cwd()`               | Host repo directory — anchor for `.sandcastle/` artifacts and git operations. Relative paths resolve against `process.cwd()`.                                                                                                |
+| `prompt`                   | string             | —                             | Inline prompt (mutually exclusive with `promptFile`)                                                                                                                                                                         |
+| `promptFile`               | string             | —                             | Path to prompt file (mutually exclusive with `prompt`). Resolves against `process.cwd()`, **not** `cwd`.                                                                                                                     |
+| `maxIterations`            | number             | `1`                           | Maximum iterations to run                                                                                                                                                                                                    |
+| `hooks`                    | SandboxHooks       | —                             | Lifecycle hooks (`host.*`, `sandbox.*`)                                                                                                                                                                                      |
+| `name`                     | string             | —                             | Display name for the run, shown as a prefix in log output                                                                                                                                                                    |
+| `promptArgs`               | PromptArgs         | —                             | Key-value map for `{{KEY}}` placeholder substitution                                                                                                                                                                         |
+| `branchStrategy`           | BranchStrategy     | per-provider default          | Branch strategy: `{ type: 'head' }`, `{ type: 'merge-to-head' }`, or `{ type: 'branch', branch: '…' }`                                                                                                                       |
+| `copyToWorktree`           | string[]           | —                             | Host-relative file paths to copy into the sandbox before start (not supported with `branchStrategy: { type: 'head' }`)                                                                                                       |
+| `logging`                  | object             | file (auto-generated)         | `{ type: 'file', path }` or `{ type: 'stdout' }`                                                                                                                                                                             |
+| `completionSignal`         | string \| string[] | `<promise>COMPLETE</promise>` | String or array of strings the agent emits to stop the iteration loop early                                                                                                                                                  |
+| `idleTimeoutSeconds`       | number             | `600`                         | Idle timeout in seconds — resets on each agent output event                                                                                                                                                                  |
+| `completionTimeoutSeconds` | number             | `60`                          | Grace window in seconds after the completion signal is observed but the agent process has not exited (hanging process). See [Hanging processes after the completion signal](#hanging-processes-after-the-completion-signal). |
+| `resumeSession`            | string             | —                             | Resume a prior session by ID for agents that support resume. Incompatible with `maxIterations > 1`. Session file must exist on host.                                                                                         |
+| `signal`                   | AbortSignal        | —                             | Cancel the run when aborted. Kills the in-flight agent subprocess and cancels lifecycle hooks; the worktree is preserved on disk. Rejects with `signal.reason`.                                                              |
+| `timeouts`                 | Timeouts           | —                             | Override default timeouts for built-in lifecycle steps: `copyToWorktreeMs` (60 000), `gitSetupMs` (10 000), `commitCollectionMs` (30 000), `mergeToHostMs` (30 000).                                                         |
+| `output`                   | OutputDefinition   | —                             | Structured output definition (`Output.object(…)` or `Output.string(…)`). Requires `maxIterations === 1`. See [Structured output](#structured-output).                                                                        |
 
 ### `RunResult`
 
@@ -794,6 +828,8 @@ Removes the Podman image.
 
 After each resumable provider iteration, Sandcastle automatically captures the agent's session file from the sandbox to the host. Claude Code sessions are stored under `~/.claude/projects/<encoded-path>/<session-id>.jsonl`; Codex sessions are stored under `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session-id>.jsonl`; Pi sessions are stored under `~/.pi/agent/sessions/--<encoded-cwd>--/<timestamp>_<session-id>.jsonl`. Any provider-specific `cwd` fields are rewritten to match the host repo root, so the provider's native resume command works.
 
+For Claude Code, any `Agent`-tool or `Workflow`-tool subagent transcripts written under `<session-id>/subagents/agent-*.jsonl` are captured alongside the main session. Subagent capture is best-effort: a failure on an individual transcript logs a warning and lets siblings and the main session through. Main-session capture failure still fails the run (see below).
+
 Session capture is enabled by default for `claudeCode()`, `codex()`, and `pi()` and can be opted out via `captureSessions: false`. Providers without `sessionStorage` do not attempt capture. Capture failure fails the run.
 
 ### Session resume
@@ -813,7 +849,7 @@ You can also continue the last captured session from a result:
 
 ```typescript
 const first = await run({
-  agent: codex("gpt-5.4-mini"),
+  agent: codex("gpt-5.4"),
   sandbox: docker(),
   prompt: "Draft a plan",
 });
@@ -867,11 +903,12 @@ The `claudeCode()` factory accepts an optional second argument for provider-spec
 agent: claudeCode("claude-opus-4-7", { effort: "high" });
 ```
 
-| Option            | Type                                                      | Default | Description                                               |
-| ----------------- | --------------------------------------------------------- | ------- | --------------------------------------------------------- |
-| `effort`          | `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | —       | Claude Code reasoning effort level (`max` is Opus only)   |
-| `env`             | `Record<string, string>`                                  | `{}`    | Environment variables injected by this agent provider     |
-| `captureSessions` | `boolean`                                                 | `true`  | Capture agent session JSONL to host for `claude --resume` |
+| Option            | Type                                                                                           | Default | Description                                                                                                                                                                                         |
+| ----------------- | ---------------------------------------------------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `effort`          | `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"`                                      | —       | Claude Code reasoning effort level (`max` is Opus only)                                                                                                                                             |
+| `env`             | `Record<string, string>`                                                                       | `{}`    | Environment variables injected by this agent provider                                                                                                                                               |
+| `captureSessions` | `boolean`                                                                                      | `true`  | Capture agent session JSONL to host for `claude --resume`                                                                                                                                           |
+| `permissionMode`  | `"default"` \| `"acceptEdits"` \| `"plan"` \| `"auto"` \| `"dontAsk"` \| `"bypassPermissions"` | —       | Maps to Claude's `--permission-mode` flag. When set, replaces Sandcastle's default `--dangerously-skip-permissions` on AFK runs. Use `"auto"` for AI-mediated per-tool approve/deny without bypass. |
 
 ### `CodexOptions`
 
@@ -881,11 +918,12 @@ The `codex()` factory accepts an optional second argument for provider-specific 
 agent: codex("gpt-5.4", { effort: "high" });
 ```
 
-| Option            | Type                                           | Default | Description                                               |
-| ----------------- | ---------------------------------------------- | ------- | --------------------------------------------------------- |
-| `effort`          | `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` | —       | Codex reasoning effort level via `model_reasoning_effort` |
-| `env`             | `Record<string, string>`                       | `{}`    | Environment variables injected by this agent provider     |
-| `captureSessions` | `boolean`                                      | `true`  | Capture Codex rollout JSONL to host for resume            |
+| Option              | Type                                           | Default | Description                                                                                                                                                                                                           |
+| ------------------- | ---------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `effort`            | `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` | —       | Codex reasoning effort level via `model_reasoning_effort`                                                                                                                                                             |
+| `env`               | `Record<string, string>`                       | `{}`    | Environment variables injected by this agent provider                                                                                                                                                                 |
+| `captureSessions`   | `boolean`                                      | `true`  | Capture Codex rollout JSONL to host for resume                                                                                                                                                                        |
+| `approvalsReviewer` | `"user"` \| `"auto_review"`                    | —       | Maps to Codex's `approvals_reviewer` config. When `"auto_review"`, swaps `--dangerously-bypass-approvals-and-sandbox` for `-a on-request -s danger-full-access` so the reviewer agent evaluates each approval prompt. |
 
 ### `PiOptions`
 

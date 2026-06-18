@@ -59,6 +59,42 @@ const setupRepo = async () => {
   return repoDir;
 };
 
+/**
+ * Set up a main repo with an `origin` remote backed by a bare repo. Returns
+ * both the repo dir (with `origin` configured) and a `pushOrigin` helper that
+ * makes a fresh commit on `branch` in a separate clone and pushes it — used to
+ * simulate someone else moving origin forward between sandcastle runs.
+ */
+const setupRepoWithOrigin = async () => {
+  const remoteDir = await mkdtemp(join(tmpdir(), "wt-remote-"));
+  await execAsync("git init --bare -b main", { cwd: remoteDir });
+
+  const repoDir = await mkdtemp(join(tmpdir(), "wt-repo-"));
+  await initRepo(repoDir);
+  await commitFile(repoDir, "hello.txt", "hello", "initial commit");
+  await execAsync(`git remote add origin "${remoteDir}"`, { cwd: repoDir });
+  await execAsync("git push -u origin main", { cwd: repoDir });
+
+  const pushOrigin = async (
+    branch: string,
+    fileName: string,
+    content: string,
+    message: string,
+  ) => {
+    const cloneDir = await mkdtemp(join(tmpdir(), "wt-clone-"));
+    await execAsync(`git clone "${remoteDir}" .`, { cwd: cloneDir });
+    await execAsync('git config user.email "test@test.com"', {
+      cwd: cloneDir,
+    });
+    await execAsync('git config user.name "Test"', { cwd: cloneDir });
+    await execAsync(`git checkout ${branch}`, { cwd: cloneDir });
+    await commitFile(cloneDir, fileName, content, message);
+    await execAsync(`git push origin ${branch}`, { cwd: cloneDir });
+  };
+
+  return { repoDir, remoteDir, pushOrigin };
+};
+
 /** Run an Effect and return its success value, throwing on failure. */
 const run = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
   Effect.runPromise(
@@ -320,6 +356,226 @@ describe("WorktreeManager.create", () => {
     expect(worktreeHead.trim()).toBe(branchHead.trim());
 
     await run(remove(path));
+  });
+
+  it("fast-forwards a clean reused worktree when origin has moved ahead", async () => {
+    const { repoDir, pushOrigin } = await setupRepoWithOrigin();
+
+    await execAsync("git checkout -b my-branch", { cwd: repoDir });
+    await commitFile(repoDir, "x.txt", "x", "branch commit");
+    await execAsync("git push -u origin my-branch", { cwd: repoDir });
+    await execAsync("git checkout main", { cwd: repoDir });
+
+    const first = await run(create(repoDir, { branch: "my-branch" }));
+    const { stdout: initialSha } = await execAsync("git rev-parse HEAD", {
+      cwd: first.path,
+    });
+
+    // Someone else pushes a new commit to origin/my-branch
+    await pushOrigin("my-branch", "new.txt", "new", "new origin commit");
+
+    const second = await run(create(repoDir, { branch: "my-branch" }));
+
+    expect(second.path).toBe(first.path);
+    expect(second.branch).toBe("my-branch");
+
+    const { stdout: afterSha } = await execAsync("git rev-parse HEAD", {
+      cwd: second.path,
+    });
+    expect(afterSha.trim()).not.toBe(initialSha.trim());
+    // The pushed file should now exist in the worktree
+    const newFile = await readFile(join(second.path, "new.txt"), "utf-8");
+    expect(newFile).toBe("new");
+
+    await run(remove(first.path));
+  });
+
+  it("preserves unpushed commits when the reused branch has diverged from origin", async () => {
+    const { repoDir, pushOrigin } = await setupRepoWithOrigin();
+
+    await execAsync("git checkout -b my-branch", { cwd: repoDir });
+    await commitFile(repoDir, "x.txt", "x", "branch commit");
+    await execAsync("git push -u origin my-branch", { cwd: repoDir });
+    await execAsync("git checkout main", { cwd: repoDir });
+
+    const first = await run(create(repoDir, { branch: "my-branch" }));
+
+    // Add an unpushed commit in the worktree
+    await commitFile(first.path, "local.txt", "local", "local-only commit");
+    const { stdout: localSha } = await execAsync("git rev-parse HEAD", {
+      cwd: first.path,
+    });
+
+    // Also push a different new commit to origin → true divergence
+    await pushOrigin("my-branch", "remote.txt", "remote", "remote-only commit");
+
+    const second = await run(create(repoDir, { branch: "my-branch" }));
+
+    expect(second.path).toBe(first.path);
+
+    // The local commit must survive — no clobber by reset --hard or similar.
+    const { stdout: afterSha } = await execAsync("git rev-parse HEAD", {
+      cwd: second.path,
+    });
+    expect(afterSha.trim()).toBe(localSha.trim());
+    const localFile = await readFile(join(second.path, "local.txt"), "utf-8");
+    expect(localFile).toBe("local");
+
+    await run(remove(first.path));
+  });
+
+  it("does not refresh a dirty reused worktree", async () => {
+    const { repoDir, pushOrigin } = await setupRepoWithOrigin();
+
+    await execAsync("git checkout -b my-branch", { cwd: repoDir });
+    await commitFile(repoDir, "x.txt", "x", "branch commit");
+    await execAsync("git push -u origin my-branch", { cwd: repoDir });
+    await execAsync("git checkout main", { cwd: repoDir });
+
+    const first = await run(create(repoDir, { branch: "my-branch" }));
+    const { stdout: initialSha } = await execAsync("git rev-parse HEAD", {
+      cwd: first.path,
+    });
+
+    // Dirty the worktree with an uncommitted change
+    await writeFile(join(first.path, "dirty.txt"), "uncommitted");
+
+    // Origin moves forward — but because the worktree is dirty, refresh
+    // should be skipped so the uncommitted change isn't disturbed.
+    await pushOrigin("my-branch", "new.txt", "new", "new origin commit");
+
+    const second = await run(create(repoDir, { branch: "my-branch" }));
+
+    expect(second.path).toBe(first.path);
+    const { stdout: afterSha } = await execAsync("git rev-parse HEAD", {
+      cwd: second.path,
+    });
+    expect(afterSha.trim()).toBe(initialSha.trim());
+    // The uncommitted file is still there
+    const dirty = await readFile(join(second.path, "dirty.txt"), "utf-8");
+    expect(dirty).toBe("uncommitted");
+
+    await run(remove(first.path));
+  });
+
+  it("treats fetch failure as non-fatal and reuses the worktree as-is", async () => {
+    // No origin remote at all — `git fetch origin <branch>` will fail.
+    const repoDir = await setupRepo();
+    await execAsync("git checkout -b my-branch", { cwd: repoDir });
+    await commitFile(repoDir, "x.txt", "x", "branch commit");
+    await execAsync("git checkout main", { cwd: repoDir });
+
+    const first = await run(create(repoDir, { branch: "my-branch" }));
+    const { stdout: initialSha } = await execAsync("git rev-parse HEAD", {
+      cwd: first.path,
+    });
+
+    // Reuse must not throw — the fetch failure is swallowed.
+    const second = await run(create(repoDir, { branch: "my-branch" }));
+
+    expect(second.path).toBe(first.path);
+    const { stdout: afterSha } = await execAsync("git rev-parse HEAD", {
+      cwd: second.path,
+    });
+    expect(afterSha.trim()).toBe(initialSha.trim());
+
+    await run(remove(first.path));
+  });
+
+  it("preserves unpushed local commits when origin has not moved (ff-only no-op)", async () => {
+    // Strictly-ahead case: origin/<branch> is an ancestor of HEAD. `git merge
+    // --ff-only` must succeed as a no-op and leave the unpushed commit intact.
+    // Distinct from the no-origin path: here fetch *succeeds* and the merge
+    // call actually runs.
+    const { repoDir } = await setupRepoWithOrigin();
+
+    await execAsync("git checkout -b my-branch", { cwd: repoDir });
+    await commitFile(repoDir, "x.txt", "x", "branch commit");
+    await execAsync("git push -u origin my-branch", { cwd: repoDir });
+    await execAsync("git checkout main", { cwd: repoDir });
+
+    const first = await run(create(repoDir, { branch: "my-branch" }));
+
+    // Local commit; origin/my-branch stays put.
+    await commitFile(first.path, "local.txt", "local", "local-only commit");
+    const { stdout: localSha } = await execAsync("git rev-parse HEAD", {
+      cwd: first.path,
+    });
+
+    const second = await run(create(repoDir, { branch: "my-branch" }));
+
+    expect(second.path).toBe(first.path);
+    const { stdout: afterSha } = await execAsync("git rev-parse HEAD", {
+      cwd: second.path,
+    });
+    expect(afterSha.trim()).toBe(localSha.trim());
+    const localFile = await readFile(join(second.path, "local.txt"), "utf-8");
+    expect(localFile).toBe("local");
+
+    await run(remove(first.path));
+  });
+
+  it("does not advance HEAD past a mid-rebase pause (detached HEAD, clean tree)", async () => {
+    // A `git rebase` paused at an `edit`/`break`/`exec` instruction leaves
+    // HEAD detached at the pause point with a clean working tree — porcelain
+    // status is empty, so the dirty guard does not catch it. Without an
+    // explicit HEAD-attached check, `git merge --ff-only origin/<branch>`
+    // would silently advance HEAD past the pause point and `git rebase
+    // --continue` would then produce confused "empty cherry-pick" output.
+    const { repoDir, pushOrigin } = await setupRepoWithOrigin();
+
+    await execAsync("git checkout -b my-branch", { cwd: repoDir });
+    await commitFile(repoDir, "a.txt", "a", "branch commit 1");
+    await commitFile(repoDir, "b.txt", "b", "branch commit 2");
+    await execAsync("git push -u origin my-branch", { cwd: repoDir });
+    await execAsync("git checkout main", { cwd: repoDir });
+
+    const first = await run(create(repoDir, { branch: "my-branch" }));
+
+    // Pause the rebase mid-way: `--exec false` runs `false` after each
+    // cherry-pick, fails on the first one, and leaves HEAD detached with a
+    // clean working tree and a populated `rebase-merge` state directory.
+    await execAsync("git rebase --exec false HEAD~2", {
+      cwd: first.path,
+    }).catch(() => {});
+
+    const { stdout: pausedSha } = await execAsync("git rev-parse HEAD", {
+      cwd: first.path,
+    });
+
+    // Sanity: HEAD must actually be detached and the tree clean — the
+    // preconditions for the bug.
+    await expect(
+      execAsync("git symbolic-ref --quiet HEAD", { cwd: first.path }),
+    ).rejects.toThrow();
+    const { stdout: status } = await execAsync("git status --porcelain", {
+      cwd: first.path,
+    });
+    expect(status.trim()).toBe("");
+
+    // Move origin forward so the buggy code would have something to ff to.
+    await pushOrigin("my-branch", "new.txt", "new", "new origin commit");
+
+    const second = await run(create(repoDir, { branch: "my-branch" }));
+    expect(second.path).toBe(first.path);
+
+    const { stdout: afterSha } = await execAsync("git rev-parse HEAD", {
+      cwd: second.path,
+    });
+    expect(afterSha.trim()).toBe(pausedSha.trim());
+
+    // Rebase state must survive — `--continue` would otherwise be impossible.
+    const { stdout: rebaseMergePath } = await execAsync(
+      "git rev-parse --git-path rebase-merge",
+      { cwd: second.path },
+    );
+    const resolvedRebaseDir = rebaseMergePath.trim().startsWith("/")
+      ? rebaseMergePath.trim()
+      : join(second.path, rebaseMergePath.trim());
+    expect((await stat(resolvedRebaseDir)).isDirectory()).toBe(true);
+
+    await execAsync("git rebase --abort", { cwd: first.path }).catch(() => {});
+    await run(remove(first.path));
   });
 
   it("reuses worktree with unpushed commits (not considered dirty)", async () => {

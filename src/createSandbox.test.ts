@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { Effect, Layer } from "effect";
 import { describe, expect, it } from "vitest";
-import { claudeCode, pi } from "./AgentProvider.js";
+import { claudeCode, codex, pi } from "./AgentProvider.js";
 import { createSandbox, type CreateSandboxOptions } from "./createSandbox.js";
 import type { SandboxService } from "./SandboxFactory.js";
 import {
@@ -91,6 +91,67 @@ const AGENT_PREFIXES: { prefix: string; toStream: (o: string) => string }[] = [
   { prefix: "claude ", toStream: toStreamJson },
   { prefix: "pi ", toStream: toPiStreamJson },
 ];
+
+/**
+ * Format a mock codex agent result as JSON stream lines, optionally including
+ * a `turn.completed` usage event so the Orchestrator can surface usage data
+ * via `streamUsage` (no session capture required).
+ */
+const toCodexStreamJsonWithUsage = (
+  output: string,
+  usage: {
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+  },
+): string => {
+  const lines: string[] = [
+    JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: output },
+    }),
+    JSON.stringify({ type: "turn.completed", usage }),
+  ];
+  return lines.join("\n");
+};
+
+/** Mock sandbox that intercepts `codex` commands and emits stream usage. */
+const makeMockCodexLayerWithUsage = (
+  sandboxDir: string,
+  output: string,
+  usage: {
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+  },
+): SandboxService => {
+  const real = makeLocalSandbox(sandboxDir);
+  return {
+    exec: (command, options) => {
+      if (command.startsWith("codex ")) {
+        const streamOutput = toCodexStreamJsonWithUsage(output, usage);
+        if (options?.onLine) {
+          const onLine = options.onLine;
+          return Effect.gen(function* () {
+            for (const line of streamOutput.split("\n")) {
+              onLine(line);
+            }
+            return { stdout: streamOutput, stderr: "", exitCode: 0 };
+          });
+        }
+        return Effect.succeed({
+          stdout: streamOutput,
+          stderr: "",
+          exitCode: 0,
+        });
+      }
+      return real.exec(command, options);
+    },
+    copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
+    copyFileOut: (sandboxPath, hostPath) =>
+      real.copyFileOut(sandboxPath, hostPath),
+  };
+};
 
 /**
  * Create a mock sandbox layer that intercepts agent commands and runs a
@@ -225,6 +286,45 @@ describe("createSandbox", () => {
       expect(result.iterations.length).toBe(1);
       expect(typeof result.stdout).toBe("string");
       expect(Array.isArray(result.commits)).toBe(true);
+    } finally {
+      await sandbox.close();
+      await rm(hostDir, { recursive: true, force: true });
+    }
+  });
+
+  it("sandbox.run() emits 'Context window: NNNk' line when an iteration has usage", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "sandbox-test-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "init.txt", "init", "initial commit");
+    const logPath = join(hostDir, "ctxwin.log");
+
+    const sandbox = await createSandbox({
+      branch: "ctxwin-branch",
+      sandbox: testSandbox,
+      cwd: hostDir,
+      _test: {
+        buildSandbox: (sandboxDir) =>
+          makeMockCodexLayerWithUsage(sandboxDir, "ok", {
+            input_tokens: 50000,
+            cached_input_tokens: 0,
+            output_tokens: 100,
+          }),
+      },
+    });
+
+    try {
+      const result = await sandbox.run({
+        agent: codex("gpt-test"),
+        prompt: "do something",
+        maxIterations: 1,
+        logging: { type: "file", path: logPath },
+      });
+
+      // Sanity-check: orchestrator surfaced usage on the iteration.
+      expect(result.iterations[0]!.usage).toBeDefined();
+
+      const log = await readFile(logPath, "utf-8");
+      expect(log).toContain("Context window: 50k");
     } finally {
       await sandbox.close();
       await rm(hostDir, { recursive: true, force: true });

@@ -14,6 +14,7 @@ import {
 } from "./errors.js";
 import { type ExecResult, type SandboxService } from "./SandboxFactory.js";
 import type { Timeouts } from "./run.js";
+import { countCommitsToSync } from "./syncOut.js";
 
 const GIT_SETUP_TIMEOUT_MS = 10_000;
 const HOOK_TIMEOUT_MS = 60_000;
@@ -377,16 +378,16 @@ export const withSandboxLifecycle = <A>(
     // Run the caller's work
     const result = yield* work({ sandbox, sandboxRepoDir, baseHead });
 
-    // Sync changes from sandbox to host worktree (isolated sandbox only)
+    // Sync changes from sandbox to host worktree (isolated sandbox only).
+    // The count resolves the base from the same sandbox-owned ref `syncOut`
+    // uses, so on run 2+ we don't anchor to the host's `am`-rewritten HEAD
+    // (which the sandbox has never seen) and silently degrade to 0.
     if (options.applyToHost) {
-      const countResult = yield* sandbox.exec(
-        `git rev-list "${baseHead}..HEAD" --count`,
-        { cwd: sandboxRepoDir },
+      const commitCount = yield* countCommitsToSync(
+        sandbox,
+        sandboxRepoDir,
+        baseHead,
       );
-      const commitCount =
-        countResult.exitCode === 0
-          ? parseInt(countResult.stdout.trim(), 10)
-          : 0;
 
       yield* display.taskLog(
         commitCount > 0
