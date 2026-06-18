@@ -218,14 +218,20 @@ const result = await run({
     type: "file",
     path: ".sandcastle/logs/my-run.log",
     // Optional: forward the agent's output stream to your own observability system.
-    // Fires for each text chunk and tool call the agent produces. Errors thrown
-    // by the callback are swallowed so a broken forwarder cannot kill the run.
+    // Fires for each text chunk, tool call, and raw stdout line the agent
+    // produces. Errors thrown by the callback are swallowed so a broken
+    // forwarder cannot kill the run.
     onAgentStreamEvent: (event) => {
-      // event is { type: "text" | "toolCall", iteration, timestamp, ... }
+      // event is { type: "text" | "toolCall" | "raw", iteration, timestamp, ... }
       myLogger.info(event);
     },
+    // Optional: append every raw stdout line the agent emits to the same
+    // log file, interleaved with the human-readable output. Includes lines
+    // the provider's stream parser would otherwise drop. Intended for
+    // debugging stuck or unexpected agent behaviour.
+    verbose: true,
   },
-  // logging: { type: "stdout" }, // OR render an interactive UI in the terminal
+  // logging: { type: "stdout", verbose: true }, // OR terminal mode (verbose: raw lines to stdout)
 
   // String (or array of strings) the agent emits to end the iteration loop early.
   // Default: "<promise>COMPLETE</promise>"

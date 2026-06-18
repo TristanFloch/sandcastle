@@ -29,6 +29,7 @@ const invokeAgent = (
   completionSignals: readonly string[],
   onText: (text: string) => void,
   onToolCall: (name: string, formattedArgs: string) => void,
+  onRawLine: (line: string) => void,
   onIdleWarning: (minutes: number) => void,
   onCompletionTimeout: (timeoutMs: number) => void,
   idleWarningIntervalMs: number = IDLE_WARNING_INTERVAL_MS,
@@ -145,6 +146,16 @@ const invokeAgent = (
       });
       const execResult = yield* sandbox.exec(printCmd.command, {
         onLine: (line) => {
+          // Surface the raw line FIRST so verbose mode/forwarders see every
+          // stdout line the agent produced, including ones parseStreamLine
+          // drops. Errors thrown by the callback are caught by the emitter
+          // layer; isolate the parser path here so a broken forwarder cannot
+          // skip parsing.
+          try {
+            onRawLine(line);
+          } catch {
+            // Swallow — must not skip parsing/timer logic below.
+          }
           for (const parsed of provider.parseStreamLine(line)) {
             if (parsed.type === "text") {
               onText(parsed.text);
@@ -430,6 +441,16 @@ export const orchestrate = (
                     }),
                   );
                 };
+                const onRawLine = (line: string) => {
+                  Effect.runPromise(
+                    streamEmitter.emit({
+                      type: "raw",
+                      line,
+                      iteration: i,
+                      timestamp: new Date(),
+                    }),
+                  );
+                };
                 const onIdleWarning = (minutes: number) => {
                   const msg =
                     minutes === 1
@@ -461,6 +482,7 @@ export const orchestrate = (
                   completionSignals,
                   onText,
                   onToolCall,
+                  onRawLine,
                   onIdleWarning,
                   onCompletionTimeout,
                   options._idleWarningIntervalMs,

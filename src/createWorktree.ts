@@ -29,6 +29,7 @@ import type { CloseResult, Sandbox } from "./createSandbox.js";
 import { createSandboxFromWorktree } from "./createSandbox.js";
 import type { InteractiveResult } from "./interactive.js";
 import {
+  buildAgentStreamHandler,
   buildCompletionMessage,
   buildContextWindowLines,
   buildLogFilename,
@@ -623,9 +624,7 @@ export const createWorktree = async (
       });
 
       const streamEmitterLayer = agentStreamEmitterLayer(
-        resolvedLogging.type === "file"
-          ? resolvedLogging.onAgentStreamEvent
-          : undefined,
+        buildAgentStreamHandler(resolvedLogging),
       );
 
       const runLayer = Layer.mergeAll(
